@@ -1327,7 +1327,14 @@ class BaseWAMArchitecture(ABC, nn.Module):
         """
         if active_action_mask is None:
             normalizer = getattr(self, "normalizer", None)
-            active_action_indices = getattr(normalizer, "_dst_index", None)
+            # Unified readers may map raw placeholder dimensions to slots so
+            # gather/scatter remains invertible, while still excluding those
+            # slots from training and inference. Prefer the explicit active
+            # subset when a reader provides it; keep the old _dst_index
+            # fallback for existing checkpoints.
+            active_action_indices = getattr(normalizer, "_active_action_indices", None)
+            if active_action_indices is None:
+                active_action_indices = getattr(normalizer, "_dst_index", None)
             unified_action_dim = getattr(normalizer, "_unify_dim", None)
             if (
                 active_action_indices is not None

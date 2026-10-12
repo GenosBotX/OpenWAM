@@ -216,6 +216,22 @@ def load_from_checkpoint_dir(
 
     # 6. Attach the action normalizer built from saved normalization_stats.npy + config.
     architecture.attach_normalizer(_build_normalizer(cfg, ckpt_dir))
+    # Some raw layouts contain mapped placeholders: they must remain available
+    # to the generic gather/scatter normalizer, but are not active denoising
+    # dimensions. The optional config list is in raw-dimension coordinates.
+    _raw_active = OmegaConf.select(cfg, "dataloader.active_raw_action_dims", default=None)
+    if _raw_active is not None and architecture.normalizer is not None:
+        _raw_active = np.asarray([int(i) for i in _raw_active], dtype=np.int64)
+        if np.unique(_raw_active).size != _raw_active.size:
+            raise ValueError(f"active_raw_action_dims contains duplicates: {_raw_active.tolist()}")
+        _dst = getattr(architecture.normalizer, "_dst_index", None)
+        if _dst is None:
+            raise ValueError("active_raw_action_dims requires dataloader.unify_action=true")
+        if _raw_active.size and (_raw_active.min() < 0 or _raw_active.max() >= len(_dst)):
+            raise ValueError(
+                f"active_raw_action_dims must be within [0, {len(_dst)}); got {_raw_active.tolist()}"
+            )
+        architecture.normalizer._active_action_indices = np.asarray(_dst, dtype=np.int64)[_raw_active]
 
     # 7. Binary command dims for the final legality projection at WAMPolicy.predict_action.
     # Authoritative source is the CKPT's dataloader config, never the deploy yaml: the training data
@@ -476,14 +492,40 @@ class _UnifyAwareNormalizer:
                 self._unify_dim,
             )
             return arr.copy() if self._inner is None else self._inner.unnormalize(arr)
-        raw = self._unmap_from_unify(arr, self._action_dst_index)
-        return raw if self._inner is None else self._inner.unnormalize(raw)
+        active = getattr(self, "_active_action_indices", None)
+        unified = arr.copy()
+        if active is not None:
+            inactive = np.ones(self._unify_dim, dtype=bool)
+            inactive[np.asarray(active, dtype=np.int64)] = False
+            unified[..., inactive] = 0.0
+        raw = self._unmap_from_unify(unified, self._action_dst_index)
+        out = raw if self._inner is None else self._inner.unnormalize(raw)
+        if active is not None:
+            active_raw = np.zeros(self._action_dst_index.shape[0], dtype=bool)
+            raw_indices = np.asarray(active, dtype=np.int64)
+            # _active_action_indices stores unified destinations; recover the
+            # corresponding raw indices without assuming contiguous mappings.
+            active_raw[np.isin(self._action_dst_index, raw_indices)] = True
+            out = np.asarray(out).copy()
+            out[..., ~active_raw] = 0.0
+        return out
 
     # proprio IN: physical raw → normalized-unified (..., unify_dim) the model wants.
     def normalize(self, x):
         arr = np.asarray(x)
+        active = getattr(self, "_active_action_indices", None)
+        if active is not None:
+            active_dst = np.asarray(active, dtype=np.int64)
+            # Keep only raw dimensions whose destinations are active. This is
+            # especially important for reserved placeholder dimensions.
+            raw_active = np.isin(self._state_dst_index, active_dst)
+            arr = arr.copy()
+            arr[..., ~raw_active] = 0.0
         if self._inner is not None:
             arr = self._inner.normalize(arr)
+        if active is not None:
+            arr = np.asarray(arr).copy()
+            arr[..., ~raw_active] = 0.0
         unified, _mask = self._map_to_unify(arr, self._state_dst_index, self._unify_dim)
         return unified
 

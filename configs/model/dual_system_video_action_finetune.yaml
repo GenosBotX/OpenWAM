@@ -1,0 +1,24 @@
+# Linglong fine-tuning with both ActionDiT and Wan video DiT trainable.
+#
+# The video DiT is intentionally unfrozen, while the expensive feature and
+# conditioning modules remain frozen. This keeps the experiment focused on
+# adapting the action/video denoisers to the Linglong embodiment.
+defaults:
+  - dual_system
+  - _self_
+
+# Keep this machine's asset paths in the Linglong configuration, not in the
+# shared backbone defaults. The merged-data config carries its own paths.
+video_backbone:
+  model_path: /iag_ad_01/ad/xiejinxia/code/test/dreamzero/checkpoints/Wan2.2-TI2V-5B
+  encoder:
+    model_path: /iag_ad_01/ad/xiejinxia/code/test/dreamzero/checkpoints/Wan2.2-TI2V-5B
+
+# Do not freeze video_backbone.dit / dit2: these are the video denoisers.
+# Keep the encoders and text/conditioning towers fixed during fine-tuning.
+freeze:
+  - video_backbone.text_encoder
+  - video_backbone.reason1
+  - video_backbone.vae
+  - video_backbone.image_encoder
+  - video_backbone.video_encoder

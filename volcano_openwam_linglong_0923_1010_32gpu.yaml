@@ -1,0 +1,25 @@
+TaskName: "openwam-linglong-0923-1010-32gpu"
+Description: "OpenWAM foundation warm-start on merged 0923+1010 Linglong 15 Hz train set; 4 nodes x 8 GPUs"
+Tags:
+  - "openwam"
+  - "linglong"
+  - "finetune"
+
+Entrypoint: >-
+  cd /iag_ad_01/ad/xiejinxia/code/test/OpenWAM &&
+  exec bash scripts/launch_volcano_linglong_0923_1010_32gpu.sh
+
+# Supply queue-specific values when submitting the task.
+ImageUrl: "${imageUrl}"
+ResourceQueueName: "${resourceQueueName}"
+Framework: "PyTorchDDP"
+
+TaskRoleSpecs:
+  - RoleName: "worker"
+    RoleReplicas: 4
+    Flavor: "${gpuFlavor}"
+
+ActiveDeadlineSeconds: "7d"
+DelayExitTimeSeconds: "1h"
+AccessType: "Private"
+Priority: 4

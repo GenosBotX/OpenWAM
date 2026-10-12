@@ -135,6 +135,28 @@ def _train_openwam(cfg: DictConfig) -> None:
     # Build dataset via registry
     dataset = build_dataset(cfg.dataloader, split="train")
 
+    # Fail before allocating the multi-billion-parameter backbone when a custom
+    # reader and model disagree on the action/state interface.
+    dataset_action_dim = getattr(dataset, "action_dim", None)
+    model_action_dim = OmegaConf.select(cfg, "model.architecture.action_dim", default=None)
+    if dataset_action_dim is not None and model_action_dim is not None:
+        if int(dataset_action_dim) != int(model_action_dim):
+            raise ValueError(
+                "Dataloader/model action width mismatch: "
+                f"dataset.action_dim={dataset_action_dim}, "
+                f"model.architecture.action_dim={model_action_dim}."
+            )
+    dataset_state_dim = getattr(dataset, "state_dim", None)
+    model_state_dim = OmegaConf.select(cfg, "model.architecture.state_dim", default=None)
+    use_proprio = bool(OmegaConf.select(cfg, "model.architecture.use_proprioception", default=False))
+    if use_proprio and dataset_state_dim is not None and model_state_dim is not None:
+        if int(dataset_state_dim) != int(model_state_dim):
+            raise ValueError(
+                "Dataloader/model state width mismatch: "
+                f"dataset.state_dim={dataset_state_dim}, "
+                f"model.architecture.state_dim={model_state_dim}."
+            )
+
     # Build trainer and run
     trainer = OpenWAMTrainer(cfg, accelerator=accelerator, dataset=dataset)
     trainer.train()

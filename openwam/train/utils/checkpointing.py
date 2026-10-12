@@ -217,7 +217,9 @@ def save_weights(accelerator, architecture, output_path: str, global_step: int, 
     tqdm.write(msg)
 
 
-def save_full_state(accelerator, output_path: str, global_step: int, opt_step: int, epoch: int) -> None:
+def save_full_state(
+    accelerator, output_path: str, global_step: int, opt_step: int, epoch: int, *, resume_context=None
+) -> None:
     """Write full Accelerate state to ``accel_state_step_N/`` for resume.
 
     ALL ranks enter (DeepSpeed shards optimizer state per-rank). rank-0 writes the
@@ -229,16 +231,23 @@ def save_full_state(accelerator, output_path: str, global_step: int, opt_step: i
     state_dir = os.path.join(output_path, f"accel_state_step_{global_step}")
     if accelerator.is_main_process:
         os.makedirs(state_dir, exist_ok=True)
+        # A failed rewrite must not leave an old completion marker behind.
+        marker = os.path.join(state_dir, "trainer_state.json")
+        if os.path.exists(marker):
+            os.remove(marker)
     accelerator.wait_for_everyone()
     accelerator.save_state(state_dir)
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         meta = {"global_step": int(global_step), "opt_step": int(opt_step), "epoch": int(epoch)}
+        if resume_context is not None:
+            meta["resume_context"] = resume_context
         meta_path = os.path.join(state_dir, "trainer_state.json")
         tmp_path = meta_path + ".tmp"
         with open(tmp_path, "w") as f:
             json.dump(meta, f)
         os.replace(tmp_path, meta_path)
+    accelerator.wait_for_everyone()
 
 
 def load_full_state(accelerator, state_dir: str) -> dict:

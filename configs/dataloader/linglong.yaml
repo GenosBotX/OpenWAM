@@ -1,0 +1,41 @@
+# Linglong decoded 15 Hz bucket. Raw data stays 24-D joint-space; the reader
+# normalizes it in raw space and scatters it into OpenWAM-alpha's 80-D input.
+type: linglong
+dataset_dir: /iag_ad_01/ad/dushuyue/openpi/data/linglong_0923_openwam_train_15hz
+
+# Raw layout:
+#   0:7 left arm joints, 7 left gripper, 8:15 right arm joints, 15 right
+#   gripper, 16:20 waist, 20:22 head, 22:24 inactive base placeholders.
+#
+# There is no arm-joint block in alpha's canonical EEF schema. Until FK-based
+# EEF enrichment is available, place scalar arm joints in otherwise joint-valued
+# hand slots, grippers in canonical gripper slots, and waist/head/placeholders
+# in reserved slots. The final two mapped slots remain mask=false.
+# This keeps the 80-D checkpoint shape and scatter/gather contract intact, but
+# it is a Linglong-specific joint-space convention rather than canonical EEF.
+action_mode: joint
+unify_action: true
+unify_action_map: ["10-16", 9, "44-50", 43, "68-75"]
+unify_state_map: null
+# Raw q/q_exp dimensions 22:24 are base placeholders. Keep them in the map so
+# deployment can still return the original 24-D controller vector, but pin
+# their unified slots to the analytic zero-noise path during inference.
+active_raw_action_dims: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
+
+num_frames: 33
+video_stride: 4
+window_stride: 1
+
+height: 384
+width: 320
+multiview: true
+camera_layout: [head, left, right]
+
+# min-max is computed from the training split and reused by the test bucket.
+normalize_mode: min-max
+
+# Debug-only overfit mode: keep one complete episode (all valid sliding
+# windows). Optional repeats deliberately cycle that episode multiple times.
+overfit_single: false
+overfit_episode: 0
+overfit_repeats: 1

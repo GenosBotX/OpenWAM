@@ -1,0 +1,393 @@
+"""Linglong decoded / OpenWAM parquet reader.
+
+The converted bucket keeps the native Linglong contract: 24-D measured joint
+state ``q`` and 24-D absolute joint target ``q_exp``. The reader normalizes in
+that native space, then optionally scatters both streams into OpenWAM's 80-D
+unified head with per-dimension masks. It does not perform any ROS parsing.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from functools import lru_cache
+from pathlib import Path
+from typing import Optional
+
+import numpy as np
+import pyarrow.parquet as pq
+import torch
+from PIL import Image
+
+from openwam.dataloader.bases import BaseDataset
+from openwam.dataloader.transforms.multiview import assemble_multiview_layout
+from openwam.dataloader.utils import get_cfg
+from openwam.dataloader.utils.normalization import apply_normalization
+from openwam.dataloader.utils.unify_action import UNIFY_DIM, map_to_unify, parse_unify_spec
+
+
+ACTION_DIM = 24
+STATE_DIM = 24
+NUM_FRAMES = 33
+VIDEO_STRIDE = 4
+VIDEO_INDICES = np.arange(0, NUM_FRAMES, VIDEO_STRIDE, dtype=np.int64)
+RAW_DIM_MASK = np.zeros(ACTION_DIM, dtype=bool)
+RAW_DIM_MASK[:22] = True  # base[22:24] are documented placeholders in Linglong.
+
+
+class LinglongDataset(BaseDataset):
+    """Reader for ``linglong_0923_openwam_{train,test}_15hz`` buckets."""
+
+    @classmethod
+    def from_config(cls, config, split: str = "train"):
+        dataset_dir = Path(get_cfg(config, "dataset_dir"))
+        if not dataset_dir.is_dir():
+            dataset_dir = cls._resolve_dataset_dir(dataset_dir)
+        # Configs point at the training bucket; select the sibling test bucket
+        # automatically for evaluation/validation builds.
+        if split in ("test", "val") and dataset_dir.name.endswith("_train_15hz"):
+            candidate = dataset_dir.with_name(dataset_dir.name.replace("_train_15hz", "_test_15hz"))
+            if candidate.is_dir():
+                dataset_dir = candidate
+        return cls(
+            dataset_dir=str(dataset_dir),
+            split=split,
+            num_frames=int(get_cfg(config, "num_frames", NUM_FRAMES)),
+            video_stride=int(get_cfg(config, "video_stride", VIDEO_STRIDE)),
+            window_stride=int(get_cfg(config, "window_stride", 1)),
+            height=int(get_cfg(config, "height", 384)),
+            width=int(get_cfg(config, "width", 320)),
+            normalize_mode=get_cfg(config, "normalize_mode", "min-max"),
+            camera_layout=list(get_cfg(config, "camera_layout", ["head", "left", "right"])),
+            multiview=bool(get_cfg(config, "multiview", True)),
+            overfit_single=bool(get_cfg(config, "overfit_single", False)),
+            overfit_episode=int(get_cfg(config, "overfit_episode", 0)),
+            overfit_repeats=int(get_cfg(config, "overfit_repeats", 1)),
+            unify_action=bool(get_cfg(config, "unify_action", True)),
+            unify_action_map=get_cfg(config, "unify_action_map", None),
+            unify_state_map=get_cfg(config, "unify_state_map", None),
+        )
+
+    @staticmethod
+    def _resolve_dataset_dir(dataset_dir: Path) -> Path:
+        """Try the alternate local/vePFS mount alias for the converted bucket."""
+        candidates = [dataset_dir]
+        raw = str(dataset_dir)
+        if raw.startswith("/iag_ad_vepfs_volc/iag_ad_vepfs_volc/"):
+            candidates.append(Path("/iag_ad_01/ad/") / raw[len("/iag_ad_vepfs_volc/iag_ad_vepfs_volc/") :])
+        if raw.startswith("/iag_ad_01/ad/"):
+            candidates.append(Path("/iag_ad_vepfs_volc/iag_ad_vepfs_volc/") / raw[len("/iag_ad_01/ad/") :])
+        for candidate in candidates:
+            if candidate.is_dir():
+                return candidate
+        return dataset_dir
+
+    def __init__(
+        self,
+        dataset_dir: str,
+        *,
+        split: str = "train",
+        num_frames: int = NUM_FRAMES,
+        video_stride: int = VIDEO_STRIDE,
+        window_stride: int = 1,
+        height: int = 384,
+        width: int = 320,
+        normalize_mode: Optional[str] = "min-max",
+        camera_layout: Optional[list[str]] = None,
+        multiview: bool = True,
+        overfit_single: bool = False,
+        overfit_episode: int = 0,
+        overfit_repeats: int = 1,
+        unify_action: bool = True,
+        unify_action_map=None,
+        unify_state_map=None,
+    ):
+        self.dataset_dir = self._resolve_dataset_dir(dataset_dir)
+        self.split = str(split)
+        self.num_frames = int(num_frames)
+        self.video_stride = int(video_stride)
+        self.window_stride = int(window_stride)
+        self.height = int(height)
+        self.width = int(width)
+        self.normalize_mode = None if normalize_mode in (None, "", "none", "null") else str(normalize_mode)
+        self.camera_layout = camera_layout or ["head", "left", "right"]
+        self.multiview = bool(multiview)
+        self.overfit_single = bool(overfit_single)
+        self.overfit_episode = int(overfit_episode)
+        self.overfit_repeats = int(overfit_repeats)
+        if self.overfit_single and self.overfit_repeats < 1:
+            raise ValueError("Linglong overfit_repeats must be >= 1")
+        self.unify_action = bool(unify_action)
+        if self.unify_action:
+            if unify_action_map is None:
+                raise ValueError("Linglong unify_action=true requires an explicit unify_action_map")
+            self._action_dst_index = parse_unify_spec(unify_action_map, UNIFY_DIM)
+            state_spec = unify_state_map if unify_state_map is not None else unify_action_map
+            self._state_dst_index = parse_unify_spec(state_spec, UNIFY_DIM)
+            if self._action_dst_index.shape != (ACTION_DIM,) or self._state_dst_index.shape != (STATE_DIM,):
+                raise ValueError("Linglong unify maps must each map all 24 raw dimensions")
+            self._action_dim = UNIFY_DIM
+            self._state_dim = UNIFY_DIM
+        else:
+            self._action_dst_index = None
+            self._state_dst_index = None
+            self._action_dim = ACTION_DIM
+            self._state_dim = STATE_DIM
+        if self.num_frames < 2 or self.video_stride < 1:
+            raise ValueError("num_frames must be >=2 and video_stride must be >=1")
+        if self.num_frames != NUM_FRAMES or self.video_stride != VIDEO_STRIDE:
+            raise ValueError("Linglong converted buckets require num_frames=33 and video_stride=4")
+        if self.multiview and len(self.camera_layout) != 3:
+            raise ValueError("Linglong multiview camera_layout must contain head, left, right")
+
+        manifest_path = self.dataset_dir / "manifest.json"
+        if not manifest_path.is_file():
+            raise FileNotFoundError(
+                "Linglong manifest is missing: "
+                f"{manifest_path}. Set dataloader.dataset_dir (or "
+                "OPENWAM_LINGLONG_DATASET_DIR) to the mounted converted bucket."
+            )
+        manifest = json.loads(manifest_path.read_text())
+        self._source_root = self._resolve_source_root(manifest.get("source_root"))
+        self._prompt = str(manifest["prompt"])
+        if not self._source_root.is_dir():
+            raise FileNotFoundError(
+                "Linglong source_root is unavailable: "
+                f"{self._source_root}. Set OPENWAM_LINGLONG_SOURCE_ROOT to the "
+                "shared decoded image root on the training nodes."
+            )
+        episodes_path = self.dataset_dir / "meta" / "episodes.jsonl"
+        self._episodes = [json.loads(line) for line in episodes_path.read_text().splitlines() if line.strip()]
+        self._tables = [
+            self.dataset_dir / "data" / f"chunk-{i // 1000:03d}" / f"episode_{i:06d}.parquet"
+            for i in range(len(self._episodes))
+        ]
+        self._windows = []
+        for local, episode in enumerate(self._episodes):
+            length = int(episode["length"])
+            max_start = length - self.num_frames if self.split in ("val", "test") else length - self.num_frames
+            if max_start >= 0:
+                self._windows.extend((local, start) for start in range(0, max_start + 1, self.window_stride))
+        if not self._windows:
+            raise ValueError(f"Linglong split={self.split!r} contains no full {self.num_frames}-frame windows")
+        self._base_num_windows = len(self._windows)
+        if self.overfit_single:
+            if self.overfit_episode < 0 or self.overfit_episode >= len(self._episodes):
+                raise ValueError(
+                    f"Linglong overfit_episode={self.overfit_episode} is outside "
+                    f"the available episode range [0, {len(self._episodes) - 1}]"
+                )
+            # "single sample" means one complete episode: retain every valid
+            # sliding window from that episode, rather than repeating one
+            # 33-frame window. Optional repeats duplicate the episode window
+            # sequence for deliberate overfit runs.
+            episode_windows = [item for item in self._windows if item[0] == self.overfit_episode]
+            if not episode_windows:
+                raise ValueError(
+                    f"Linglong overfit_episode={self.overfit_episode} has no full "
+                    f"{self.num_frames}-frame windows"
+                )
+            self._windows = episode_windows * self.overfit_repeats
+
+        stats = json.loads((self.dataset_dir / "meta" / "normalization_stats.json").read_text())
+        self._state_stats = {k: np.asarray(v, dtype=np.float32) for k, v in stats["state"].items() if k != "count"}
+        self._action_stats = {k: np.asarray(v, dtype=np.float32) for k, v in stats["action"].items() if k != "count"}
+        if self.normalize_mode not in (None, "min-max", "z-score", "quantile"):
+            raise ValueError(f"unsupported Linglong normalize_mode={self.normalize_mode!r}")
+
+        # Training copies this artifact into the checkpoint for deployment.
+        # Keep action and proprio statistics separate while using the standard
+        # OpenWAM "joint" action-mode key.
+        stats_artifact = self.dataset_dir / "meta" / "normalization_stats.npy"
+        if not stats_artifact.is_file():
+            raise FileNotFoundError(f"Linglong deploy normalization artifact is missing: {stats_artifact}")
+        self.normalization_stats_path = str(stats_artifact)
+
+    @property
+    def action_dim(self) -> int:
+        return self._action_dim
+
+    @staticmethod
+    def _resolve_dataset_dir(dataset_dir) -> Path:
+        """Resolve the converted bucket across local/Volcano mount aliases.
+
+        The launcher may pass a path using the vePFS prefix while a worker
+        exposes the same tree through the development prefix (or vice versa).
+        Probe both forms before opening ``manifest.json``.  An explicit
+        environment override is useful for clusters with a site-specific
+        mount point.
+        """
+        raw = str(dataset_dir)
+        candidates = []
+        override = os.environ.get("OPENWAM_LINGLONG_DATASET_DIR")
+        if override:
+            candidates.append(Path(override))
+        candidates.append(Path(raw))
+
+        if raw.startswith("/iag_ad_01/ad/"):
+            suffix = raw[len("/iag_ad_01/ad/") :]
+            candidates.extend(
+                [
+                    Path("/iag_ad_vepfs_volc/iag_ad_vepfs_volc") / suffix,
+                    Path("/iag_ad_vepfs_volc") / suffix,
+                ]
+            )
+        if raw.startswith("/iag_ad_vepfs_volc/iag_ad_vepfs_volc/"):
+            suffix = raw[len("/iag_ad_vepfs_volc/iag_ad_vepfs_volc/") :]
+            candidates.extend(
+                [
+                    Path("/iag_ad_01/ad") / suffix,
+                    Path("/iag_ad_vepfs_volc") / suffix,
+                ]
+            )
+        elif raw.startswith("/iag_ad_vepfs_volc/"):
+            suffix = raw[len("/iag_ad_vepfs_volc/") :]
+            candidates.extend(
+                [
+                    Path("/iag_ad_01/ad") / suffix,
+                    Path("/iag_ad_vepfs_volc/iag_ad_vepfs_volc") / suffix,
+                ]
+            )
+
+        seen = set()
+        unique = []
+        for candidate in candidates:
+            candidate = candidate.expanduser()
+            key = str(candidate)
+            if key not in seen:
+                seen.add(key)
+                unique.append(candidate)
+            if (candidate / "manifest.json").is_file():
+                return candidate
+
+        raise FileNotFoundError(
+            "Linglong dataset bucket/manifest.json not found. Tried: "
+            + ", ".join(str(path / "manifest.json") for path in unique)
+        )
+
+    @staticmethod
+    def _resolve_source_root(manifest_root) -> Path:
+        """Resolve image root across local and Volcano vePFS mount aliases.
+
+        The converter records the path visible on the machine where it runs.
+        Volcano workers mount the same vePFS tree under a different prefix, so
+        the manifest path may not exist even though the data is present.
+        ``OPENWAM_LINGLONG_SOURCE_ROOT`` is an explicit override; otherwise
+        try the known vePFS aliases before returning the original path.
+        """
+        override = os.environ.get("OPENWAM_LINGLONG_SOURCE_ROOT")
+        candidates = []
+        if override:
+            candidates.append(Path(override))
+        if manifest_root:
+            raw = str(manifest_root)
+            candidates.append(Path(raw))
+            # /iag_ad_01/ad/... on the dev host -> shared vePFS mount on
+            # Volcano workers.
+            if raw.startswith("/iag_ad_01/ad/"):
+                candidates.append(Path("/iag_ad_vepfs_volc/iag_ad_vepfs_volc/") / raw[len("/iag_ad_01/ad/") :])
+            if raw.startswith("/iag_ad_vepfs_volc/"):
+                candidates.append(Path("/iag_ad_vepfs_volc/iag_ad_vepfs_volc/") / raw[len("/iag_ad_vepfs_volc/") :])
+                if raw.startswith("/iag_ad_vepfs_volc/iag_ad_vepfs_volc/"):
+                    candidates.append(Path("/iag_ad_01/ad/") / raw[len("/iag_ad_vepfs_volc/iag_ad_vepfs_volc/") :])
+            # Be tolerant of a path serialized without its leading '/'.
+            if not raw.startswith("/"):
+                candidates.append(Path("/iag_ad_vepfs_volc/iag_ad_vepfs_volc") / raw)
+        for candidate in candidates:
+            if candidate.is_dir():
+                return candidate
+        return candidates[0] if candidates else Path(".")
+
+    @property
+    def state_dim(self) -> int:
+        return self._state_dim
+
+    @property
+    def normalization_stats(self) -> dict:
+        return {"action": dict(self._action_stats), "state": dict(self._state_stats)}
+
+    def __len__(self) -> int:
+        return len(self._windows)
+
+    @lru_cache(maxsize=128)
+    def _read_table(self, local: int):
+        return pq.read_table(
+            self._tables[local],
+            columns=[
+                "observation.state",
+                "action",
+                "observation.images.head",
+                "observation.images.left",
+                "observation.images.right",
+            ],
+        )
+
+    def _norm(self, values: np.ndarray, stats: dict) -> np.ndarray:
+        return np.asarray(apply_normalization(values, stats, self.normalize_mode), dtype=np.float32)
+
+    def _image(self, rel: str) -> Image.Image:
+        path = self._source_root / rel
+        with Image.open(path) as image:
+            return image.convert("RGB")
+
+    def __getitem__(self, index: int) -> dict:
+        local, start = self._windows[index]
+        table = self._read_table(local).slice(start, self.num_frames)
+        state = np.asarray(table["observation.state"].to_pylist(), dtype=np.float32)
+        action = np.asarray(table["action"].to_pylist(), dtype=np.float32)
+        if state.shape != (self.num_frames, STATE_DIM) or action.shape != (self.num_frames, ACTION_DIM):
+            raise ValueError(f"Linglong row shape mismatch: state={state.shape}, action={action.shape}")
+
+        frames = []
+        for t in VIDEO_INDICES:
+            cams = {
+                "head": self._image(table["observation.images.head"][int(t)].as_py()),
+                "left": self._image(table["observation.images.left"][int(t)].as_py()),
+                "right": self._image(table["observation.images.right"][int(t)].as_py()),
+            }
+            if self.multiview:
+                frames.append(assemble_multiview_layout(cams, self.camera_layout, self.height, self.width))
+            else:
+                frames.append(cams["head"].resize((self.width, self.height), Image.BILINEAR))
+
+        # OpenWAM-α always consumes an 80-D unified vector.  Normalize in the
+        # native 24-D joint space first, then scatter into the configured
+        # slots; this is the inverse of deployment's gather-then-unnormalize.
+        raw_action = self._norm(action[: self.num_frames - 1], self._action_stats)
+        raw_proprio = self._norm(state[:1], self._state_stats)
+        # The two base placeholders are absent signals, not constant commands.
+        # Zero them after normalization so they cannot leak into the action or
+        # proprio encoders even though their loss-mask entries are false.
+        raw_action[..., ~RAW_DIM_MASK] = 0.0
+        raw_proprio[..., ~RAW_DIM_MASK] = 0.0
+        if self.unify_action:
+            action_out, action_dim_mask = map_to_unify(raw_action, self._action_dst_index, UNIFY_DIM)
+            proprio_out, proprio_dim_mask = map_to_unify(raw_proprio, self._state_dst_index, UNIFY_DIM)
+            action_dim_mask = action_dim_mask & self._scatter_mask(self._action_dst_index)
+            proprio_dim_mask = proprio_dim_mask & self._scatter_mask(self._state_dst_index)
+        else:
+            action_out, proprio_out = raw_action, raw_proprio
+            action_dim_mask = RAW_DIM_MASK
+            proprio_dim_mask = RAW_DIM_MASK
+        action_mask = torch.from_numpy(np.broadcast_to(action_dim_mask, action_out.shape).copy())
+        proprio_mask = torch.from_numpy(proprio_dim_mask[None, :].copy())
+        return {
+            "video": frames,
+            "vace_video": None,
+            "first_frame_image": [frames[0]],
+            "action": torch.from_numpy(action_out),
+            "action_mask": action_mask,
+            "video_mask": torch.ones(len(frames), dtype=torch.bool),
+            "proprio": torch.from_numpy(proprio_out),
+            "proprio_mask": proprio_mask,
+            "prompt": (self._episodes[local].get("tasks") or [self._prompt])[0],
+            "episode_index": int(self._episodes[local]["episode_index"]),
+            "start_frame": int(start),
+        }
+
+    @staticmethod
+    def _scatter_mask(dst_index: np.ndarray) -> np.ndarray:
+        mask = np.zeros(UNIFY_DIM, dtype=bool)
+        mask[dst_index[RAW_DIM_MASK]] = True
+        return mask
+__all__ = ["LinglongDataset"]

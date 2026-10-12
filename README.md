@@ -457,7 +457,7 @@ Have a question, want to share results, or just follow development? Join us:
 <table align="center">
   <tr>
     <td align="center" width="360">
-      <img src="assets/repo_images/WeChat_Group.jpg" alt="OpenWAM WeChat group QR code" height="300">
+      <img src="assets/repo_images/WeChat_Group.png" alt="OpenWAM WeChat group QR code" height="300">
       <br><br>
       <b>WeChat Group</b>
       <br>

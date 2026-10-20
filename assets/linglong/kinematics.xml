@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Kinematic subset of Linglong-H linglong-h-stack-parts.xml.
+     Original XML SHA256: c32f7e36d339424a1c0535209a406733be91d0ed48afdfbf57746a62700f02d5
+     Only base-to-wrist body transforms and hinge axes are needed by the local
+     FK reader. Meshes, dynamics, joint limits and hand geometry are omitted.
+     TCP offset in wrist coordinates: [0.0813, 0, 0.0081] metres.
+     This is an FK asset, not a simulation model. -->
+<mujoco model="linglong-h-kinematics">
+  <compiler angle="radian"/>
+  <worldbody>
+    <body name="base_link">
+      <body name="waist_1_link">
+        <joint name="waist_1_joint" axis="0 1 0"/>
+        <body name="waist_2_link" pos="0.28 0 0.105">
+          <joint name="waist_2_joint" axis="0 1 0"/>
+          <body name="waist_3_link" pos="-0.28 0 0.105">
+            <joint name="waist_3_joint" axis="0 1 0"/>
+            <body name="waist_yaw_link" pos="0 0 0.139">
+              <joint name="waist_yaw_joint" axis="0 0 1"/>
+              <body name="left_shoulder_pitch_link" pos="0 0.21175 0.39195">
+                <joint name="left_shoulder_pitch_joint" axis="0 1 0"/>
+                <body name="left_shoulder_roll_link">
+                  <joint name="left_shoulder_roll_joint" axis="1 0 0"/>
+                  <body name="left_shoulder_yaw_link">
+                    <joint name="left_shoulder_yaw_joint" axis="0 0 1"/>
+                    <body name="left_elbow_link" pos="0.00005 0 -0.26">
+                      <joint name="left_elbow_joint" axis="0 1 0"/>
+                      <body name="left_wrist_roll_link" pos="0.198 0 0">
+                        <joint name="left_wrist_roll_joint" axis="1 0 0"/>
+                        <body name="left_wrist_pitch_link">
+                          <joint name="left_wrist_pitch_joint" axis="0 1 0"/>
+                          <body name="left_wrist_yaw_link" pos="0.062 0 0">
+                            <joint name="left_wrist_yaw_joint" axis="0 0 1"/>
+                          </body>
+                        </body>
+                      </body>
+                    </body>
+                  </body>
+                </body>
+              </body>
+              <body name="right_shoulder_pitch_link" pos="0 -0.21175 0.39195">
+                <joint name="right_shoulder_pitch_joint" axis="0 1 0"/>
+                <body name="right_shoulder_roll_link">
+                  <joint name="right_shoulder_roll_joint" axis="1 0 0"/>
+                  <body name="right_shoulder_yaw_link">
+                    <joint name="right_shoulder_yaw_joint" axis="0 0 1"/>
+                    <body name="right_elbow_link" pos="0 0 -0.26">
+                      <joint name="right_elbow_joint" axis="0 1 0"/>
+                      <body name="right_wrist_roll_link" pos="0.198 0 0">
+                        <joint name="right_wrist_roll_joint" axis="1 0 0"/>
+                        <body name="right_wrist_pitch_link">
+                          <joint name="right_wrist_pitch_joint" axis="0 1 0"/>
+                          <body name="right_wrist_yaw_link" pos="0.062 0 0">
+                            <joint name="right_wrist_yaw_joint" axis="0 0 1"/>
+                          </body>
+                        </body>
+                      </body>
+                    </body>
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+</mujoco>

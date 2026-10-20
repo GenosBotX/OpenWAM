@@ -52,16 +52,35 @@ source /vePFS/tangyuting/OpenWAM/scripts/activate_vepfs_openwam.sh
 
 ### 2.2 数据格式、采样和 prompt
 
-[scripts/convert_linglong.py](../../scripts/convert_linglong.py) 读取 processed 数据中的 `inventory.json`、`aligned.csv` 和 `alignment.jsonl`，按头部时间戳在 15 Hz 网格上选择最近记录，输出 episode parquet、图像路径、元数据和归一化统计。该脚本的固定 prompt 包含 blue block；多颜色采集应在 episode 元数据中使用对应任务描述。
+[scripts/convert_linglong.py](../../scripts/convert_linglong.py) 读取 ROS2 bag 原始 zip、tar 或文件夹，在仓库内解码 CDR，并按头部相机时间戳对齐到 15 Hz；输出 joint/action、FK `action_eef`、实测 `/end_pos` `observation.state_eef`、图像、元数据和归一化统计。任务文本通过 `--prompt` 显式指定；多任务数据可用 `--episode-config` 按原始 episode ID 指定 prompt 和 split。
 
-原有 0923+1010 关节合并数据的 manifest 记录：
+```bash
+python scripts/convert_linglong.py \
+  --input /path/to/raw_linglong.zip \
+  --output-root /path/to/openwam_linglong \
+  --prompt "Use the right arm to pick up the blue block from the table and place it in the box." \
+  --test-fraction 0.1 --seed 0
+```
 
-| 数据集 | episode 数 | 原始帧数 |
-| --- | --- | --- |
-| 训练集 | 184 | 36,281 |
-| 测试集 | 20 | 4,489 |
+输入可为 zip（内含每 episode tar）、原始文件夹、tar(.gz)、单个 episode 目录或 `.db3`。生成 `linglong_openwam_train_15hz/` 和 `linglong_openwam_test_15hz/`；两者均自带图像文件，训练统计由 train 计算并由 test 复用。FK 默认使用仓库内 `assets/linglong/kinematics.xml`，不需要外部模型代码或模型文件；`--model` 仅用于显式覆盖 FK 资产。若需固定 episode 划分或每集不同任务，可传 JSON，例如 `{"2026-10-10T1206.48/采集任务-test_88.tar!bag/bag_0.db3":{"prompt":"...","split":"test"}}`。不提供 prompt 的 episode 必须在该 JSON 中有自己的 `prompt`；文件名不会被当作任务描述。
 
-图像通过 `images/0923`、`images/1010` 链接访问 decoded 源目录，运行时需要保留这些链接及其目标。parquet 和图像路径共同组成完整数据集。
+仅转换数据需要 NumPy、SciPy、Pillow、PyArrow，无需 ROS 或 GPU。原始 bag 必须包含 `/driver_pvt`、`/end_pos` 和 head/left/right 三路压缩图像；输出同时保留 joint 与 EEF 两组列。夹爪直接保留原始 `q/q_exp`，不做反馈修复。相同 bag 按 SHA256 去重；时间戳不连续、缺少必需流或不足 33 个采样帧时会报错。输出目录须尚未存在；只有一个 episode 或 `--test-fraction 0` 时默认仅生成 train 桶。
+
+训练关节表示时使用 `action_key: action`、`state_key: observation.state`、`action_mode: joint` 及 24 维映射。训练 EEF 表示时配置如下（训练和测试的归一化均指向 train 桶）：
+
+```yaml
+dataloader:
+  dataset_dir: /path/to/openwam_linglong/linglong_openwam_train_15hz
+  normalization_dataset_dir: /path/to/openwam_linglong/linglong_openwam_train_15hz
+  action_key: action_eef
+  state_key: observation.state_eef
+  action_mode: eef_quat
+  unify_action: true
+  unify_action_map: ["0-6", 9, "34-40", 43]
+  unify_state_map: ["0-6", 9, "34-40", 43]
+  active_raw_action_dims: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+  active_raw_state_dims: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+```
 
 读取器优先使用 `meta/episodes.jsonl` 中的 `tasks[0]`，缺失时使用 manifest 的 prompt。合并数据包含：
 

@@ -173,7 +173,10 @@ class LinglongDataset(BaseDataset):
                 raise ValueError("EEF state requires a converted bucket with its 16D base_link/wxyz contract")
         if self.action_key == "action_eef" and self.split in ("test", "val") and manifest.get("split") == "train":
             raise ValueError("EEF test/val requires a separate held-out EEF bucket, not the training bucket")
-        self._source_root = self._resolve_source_root(manifest.get("source_root"))
+        image_root = manifest.get("source_root")
+        if image_root is not None and not Path(image_root).is_absolute():
+            image_root = str(self.dataset_dir / image_root)
+        self._source_root = self._resolve_source_root(image_root)
         self._prompt = str(manifest["prompt"])
         if not self._source_root.is_dir():
             raise FileNotFoundError(

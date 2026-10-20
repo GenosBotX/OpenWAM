@@ -89,15 +89,25 @@ class LiberoDataset(LeRobotV3Reader):
     PROMPT_FILE_REQUIRED = True
     DEPLOY_ACTION_MODE = ACTION_MODE
 
-    # Fixed camera layout (head, wrist, unused); None slots are rendered black
-    # in multiview mode. Override via ``camera_layout``.
-    DEFAULT_CAMERA_LAYOUT: ClassVar[Tuple[Optional[str], ...]] = (
+    # LIBERO exports have used both the canonical ``image/image2`` names and
+    # the older ``agentview_image/wrist_image`` names. Resolve from the
+    # features advertised by info.json so a dataset's actual camera streams
+    # are used instead of assuming one naming convention.
+    HEAD_CAMERA_PRIORITY: ClassVar[Tuple[str, ...]] = (
         "observation.images.image",
+        "observation.images.agentview_image",
+        "observation.images.agentview",
+    )
+    WRIST_CAMERA_PRIORITY: ClassVar[Tuple[str, ...]] = (
+        "observation.images.wrist_image",
         "observation.images.image2",
-        None,
+        "observation.images.robot0_eye_in_hand_image",
+        "observation.images.wrist",
     )
     CONFIG_KEYS: ClassVar[Tuple[str, ...]] = LeRobotV3Reader.CONFIG_KEYS + (
         "action_mode",
+        "head_camera_priority",
+        "wrist_camera_priority",
         "normalization_stats_path",
     )
 
@@ -106,6 +116,8 @@ class LiberoDataset(LeRobotV3Reader):
         dataset_dir: str,
         *,
         action_mode: str = ACTION_MODE,
+        head_camera_priority: Optional[Sequence[str]] = None,
+        wrist_camera_priority: Optional[Sequence[str]] = None,
         normalization_stats_path: Optional[str] = None,
         unify_action: bool = False,
         unify_action_map: Optional[Any] = None,
@@ -123,6 +135,8 @@ class LiberoDataset(LeRobotV3Reader):
         self.action_mode = mode
         self._source_stats_path = str(normalization_stats_path) if normalization_stats_path else None
         self._state_normalization_stats: Optional[dict] = None
+        self._head_priority = _as_priority(head_camera_priority, self.HEAD_CAMERA_PRIORITY)
+        self._wrist_priority = _as_priority(wrist_camera_priority, self.WRIST_CAMERA_PRIORITY)
         super().__init__(
             dataset_dir=dataset_dir,
             unify_action=bool(unify_action),
@@ -131,11 +145,49 @@ class LiberoDataset(LeRobotV3Reader):
         )
 
     def _resolve_cameras(self, info: dict):
-        if self._target_camera is not None:
+        # ``target_camera`` selects the single-view stream. In multiview mode
+        # it must not suppress the auxiliary streams: benchmark configs may
+        # carry the single-view field for deployment compatibility.
+        if not self._multiview and self._target_camera is not None:
             return self._target_camera, None, None
-        layout = list(self._camera_layout_param or self.DEFAULT_CAMERA_LAYOUT)
-        layout += [None] * (3 - len(layout))
-        return tuple(str(cam) if cam else None for cam in layout[:3])
+
+        features = info.get("features", {}) or {}
+
+        # An explicit layout is the requested slot order, but configs can be
+        # shared by LIBERO exports with different camera names. Replace a
+        # missing non-null request with the feature-based camera for that slot,
+        # then feed the resolved names back to the base reader so assembly and
+        # decoding use the same keys.
+        if self._multiview and self._camera_layout_param is not None:
+            requested = list(self._camera_layout_param)[:3]
+            requested += [None] * (3 - len(requested))
+            fallback = (
+                _pick_feature(features, self._head_priority),
+                _pick_feature(features, self._wrist_priority),
+                None,
+            )
+            resolved = tuple(
+                (str(name) if name in features else fallback[index]) if name else None
+                for index, name in enumerate(requested)
+            )
+            self._camera_layout_param = list(resolved)
+            return resolved
+
+        if not self._multiview and self._camera_layout_param is not None:
+            requested = list(self._camera_layout_param)[:3]
+            if requested:
+                requested_camera = requested[0]
+                if requested_camera is None:
+                    return None, None, None
+                if requested_camera in features:
+                    return str(requested_camera), None, None
+                return _pick_feature(features, self._head_priority), None, None
+
+        return (
+            _pick_feature(features, self._head_priority),
+            _pick_feature(features, self._wrist_priority),
+            None,
+        )
 
     def _post_init(self, info: dict) -> None:
         features = info.get("features", {}) or {}

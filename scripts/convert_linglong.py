@@ -53,8 +53,10 @@ def _fixed_list(values: np.ndarray, width: int) -> pa.Array:
 def _sample_episode(decoded_dir: Path) -> tuple[dict, np.ndarray, np.ndarray]:
     csv_path = decoded_dir / "aligned.csv"
     alignment_path = decoded_dir / "alignment.jsonl"
-    rows = list(csv.DictReader(csv_path.open()))
-    alignments = [json.loads(line) for line in alignment_path.open()]
+    with csv_path.open() as stream:
+        rows = list(csv.DictReader(stream))
+    with alignment_path.open() as stream:
+        alignments = [json.loads(line) for line in stream]
     if len(rows) != len(alignments) or not rows:
         raise ValueError(f"{decoded_dir}: aligned.csv/alignment.jsonl length mismatch")
 

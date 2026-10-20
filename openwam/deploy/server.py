@@ -36,6 +36,11 @@ Messages:
     ping  → {"type": "pong"}
     error → {"type": "error", "code": str, "message": "<what went wrong>"}
 
+With ``inference.action_response_mode=chunk`` (sync only), ``action`` is a
+full (T, D) matrix generated from each obs. Responses also carry
+``action_response_mode``, ``num_actions``, and ``action_dim``; ``step`` counts
+requests. The client schedules execution at the checkpoint's action rate.
+
 Usage:
     server = PolicyServer(engine, cfg)
     server.run(host="0.0.0.0", port=8848)
@@ -73,6 +78,18 @@ ERR_INTERNAL = "internal_error"
 # Cap for a single obs message. A multi-camera base64 frame can exceed the
 # 1 MB websockets default, so lift it for the obs stream.
 MAX_MESSAGE_BYTES = 32 * 1024 * 1024
+
+
+def _action_response_mode(cfg) -> str:
+    from omegaconf import OmegaConf
+    from openwam.deploy.executors import resolve_execution_config
+
+    mode = OmegaConf.select(cfg, "inference.action_response_mode", default="single")
+    if mode not in ("single", "chunk"):
+        raise ValueError("inference.action_response_mode must be single or chunk")
+    if mode == "chunk" and resolve_execution_config(cfg).enabled:
+        raise ValueError("Chunk responses require inference_mode=sync")
+    return mode
 
 
 def _infer_video_num_frames(dl) -> int:
@@ -131,6 +148,7 @@ class PolicyServer:
         self.engine = engine
         self.cfg = cfg
         self.readiness_token = readiness_token
+        self.action_response_mode = _action_response_mode(cfg)
 
         # Lazy imports at init time to validate availability
         self._policy = None
@@ -182,6 +200,13 @@ class PolicyServer:
         """Return checkpoint compatibility plus optional launch ownership."""
 
         result = self._ckpt_contract()
+        # Linglong clients use the wire name "eef" for the 16D quaternion
+        # contract. Keep the checkpoint's internal eef_quat representation
+        # unchanged: it selects the state/action transforms and statistics.
+        if result.get("representation") == "eef_quat":
+            result["representation"] = "eef"
+        if self.action_response_mode == "chunk":
+            result["action_response_mode"] = "chunk"
         if self.readiness_token is not None:
             result["readiness_token"] = self.readiness_token
         return result
@@ -198,24 +223,39 @@ class PolicyServer:
                 preprocessing internally; prompt wrapping is the client's job.
 
         Returns:
-            dict with "action" (list of floats in physical units),
+            dict with "action" (vector or chunk matrix in physical units),
             "step", "latency_ms".
         """
         self._init_policy()
         t0 = time.monotonic()
 
         obs = self._obs_preprocessor.preprocess(obs)
-        action = self._policy.predict_action(obs)
+        if self.action_response_mode == "chunk":
+            from omegaconf import OmegaConf
+
+            action = self._policy.predict_action_chunk(obs)
+            num_frames = OmegaConf.select(self.cfg, "inference.num_frames", default=None)
+            if num_frames is not None and len(action) != int(num_frames) - 1:
+                raise ValueError(f"Expected {int(num_frames) - 1} actions, got {len(action)}")
+        else:
+            action = self._policy.predict_action(obs)
 
         latency_ms = (time.monotonic() - t0) * 1000
         self._request_count += 1
         self._total_latency += latency_ms
 
-        return {
+        result = {
             "action": action.tolist(),
             "step": self._request_count,
             "latency_ms": round(latency_ms, 2),
         }
+        if self.action_response_mode == "chunk":
+            result.update(
+                action_response_mode="chunk",
+                num_actions=int(action.shape[0]),
+                action_dim=int(action.shape[1]),
+            )
+        return result
 
     def reset(self):
         """Reset policy state."""
@@ -571,6 +611,7 @@ def _validate_inference_config(cfg):
 
     _validate_denoise_config(cfg)
     resolve_execution_config(cfg)
+    _action_response_mode(cfg)
 
 
 def _load_deploy_yaml(config_path: Optional[str] = None):

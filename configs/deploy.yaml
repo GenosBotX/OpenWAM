@@ -6,10 +6,11 @@ server:
   port: 8848                   # WebSocket port
 
 # --- Inference (cfg.inference) ---
-# Every field has a same-name CLI override (--denoise-steps, --inference-mode, ...).
+# Most fields have a same-name CLI override (--denoise-steps, --inference-mode, ...).
 # Switching either mode to sync resets only that mode's async-only fields, so
 # an async-tuned yaml can be run as the sync baseline with a single flag.
 inference:
+  action_response_mode: single # single | chunk; override with inference.action_response_mode=chunk
   denoise_steps: 10
 
   denoise_mode: sync          # trajectory: sync | async; separate from inference_mode

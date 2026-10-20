@@ -12,6 +12,8 @@ The executor is chosen once at construction from the normalized async
 config; per-step dispatch is plain delegation.
 """
 
+import logging
+
 import numpy as np
 
 from openwam.deploy.engine import BaseInferenceEngine
@@ -20,6 +22,8 @@ from openwam.deploy.executors import (
     SyncInferenceExecutor,
     normalize_execution_config,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class WAMPolicy:
@@ -61,6 +65,51 @@ class WAMPolicy:
         downstream command contract for the WS server and direct consumers.
         """
         action = self._executor.predict_action(self._build_conditions(obs))
+        return self._normalize_eef_quaternions(self._project_binary_commands(action))
+
+    def predict_action_chunk(self, obs: dict) -> np.ndarray:
+        """Generate a full physical-space chunk from this observation, without buffering."""
+        if self._async:
+            raise ValueError("Chunk responses require inference_mode=sync")
+        self._executor.reset()
+        actions = self.engine.generate(self._build_conditions(obs))["actions"]
+        if hasattr(actions, "cpu"):
+            actions = actions.detach().float().cpu().numpy()
+        actions = np.asarray(actions)
+        if actions.ndim != 2 or 0 in actions.shape or not np.isfinite(actions).all():
+            raise ValueError("Expected a nonempty finite (num_actions, action_dim) chunk")
+        return self._normalize_eef_quaternions(self._project_binary_commands(actions))
+
+    def _normalize_eef_quaternions(self, action: np.ndarray) -> np.ndarray:
+        """Project physical Linglong EEF16 quaternions onto the unit sphere.
+
+        The engine has already gathered and unnormalized the model output.
+        Use the checkpoint's internal representation, since the wire name
+        ``eef`` also covers other datasets with different orientation layouts.
+        """
+        contract = getattr(getattr(self.engine, "architecture", None), "repr_contract", {}) or {}
+        if contract.get("representation") != "eef_quat":
+            return action
+        action = np.asarray(action)
+        if action.ndim not in (1, 2) or action.shape[-1] != 16 or not np.isfinite(action).all():
+            raise ValueError("Expected finite EEF16 action(s) before quaternion normalization")
+        quaternions = np.stack((action[..., 3:7], action[..., 11:15]), axis=-2).astype(np.float64)
+        norms = np.linalg.norm(quaternions, axis=-1, keepdims=True)
+        if not np.isfinite(norms).all() or np.any(norms <= 1e-8):
+            raise ValueError("EEF16 quaternion has a non-finite or near-zero norm; refusing action")
+        if np.any(np.abs(norms - 1.0) > 0.05):
+            logger.warning(
+                "Normalizing EEF16 output quaternions: raw norm range [%.8f, %.8f]",
+                float(norms.min()), float(norms.max()),
+            )
+        result = np.array(action, dtype=np.result_type(action.dtype, np.float32), copy=True)
+        unit_quaternions = quaternions / norms
+        result[..., 3:7] = unit_quaternions[..., 0, :]
+        result[..., 11:15] = unit_quaternions[..., 1, :]
+        return result
+
+    def _project_binary_commands(self, action: np.ndarray) -> np.ndarray:
+        """Apply the checkpoint's binary command contract to vectors or chunks."""
         dims = getattr(getattr(self.engine, "architecture", None), "binary_command_dims", ()) or ()
         if dims:
             action = np.array(action)

@@ -9,7 +9,8 @@ PYTHON_BIN="${PYTHON_BIN:-/iag_ad_01/ad/xiejinxia/envs/dreamzero/bin/python}"
 NPROC="${NPROC:-8}"
 EXPECTED_WORLD_SIZE="${EXPECTED_WORLD_SIZE:-32}"
 MASTER_PORT="${MASTER_PORT:-29500}"
-DATASET_DIR="$REPO_ROOT/data/linglong_0923_1010_openwam_train_15hz"
+CONFIG_NAME="${CONFIG_NAME:-train_linglong_0923_1010}"
+DATASET_DIR="${DATASET_DIR:-$REPO_ROOT/data/linglong_0923_1010_openwam_train_15hz}"
 
 cd "$REPO_ROOT"
 if [[ ! "$NPROC" =~ ^[1-9][0-9]*$ || ! "$EXPECTED_WORLD_SIZE" =~ ^[1-9][0-9]*$ ]]; then
@@ -86,7 +87,7 @@ if [[ ! -f "$DATASET_DIR/manifest.json" || ! -f "$DATASET_DIR/meta/normalization
   echo "ERROR: merged Linglong bucket is not ready: $DATASET_DIR" >&2
   exit 2
 fi
-if [[ ! -f "$REPO_ROOT/configs/train_linglong_0923_1010.yaml" ]]; then
+if [[ ! -f "$REPO_ROOT/configs/${CONFIG_NAME}.yaml" ]]; then
   echo "ERROR: merged training config is missing" >&2
   exit 2
 fi
@@ -98,7 +99,7 @@ launch_command=("$PYTHON_BIN" -m torch.distributed.run \
   --master_addr="$MASTER_ADDR" \
   --master_port="$MASTER_PORT" \
   scripts/train.py \
-  --config-name=train_linglong_0923_1010 "$@")
+  --config-name="$CONFIG_NAME" "$@")
 if [[ "${OPENWAM_LAUNCH_DRYRUN:-0}" == 1 ]]; then
   printf '%q ' "${launch_command[@]}"
   printf '\n'

@@ -1,9 +1,8 @@
 """Linglong decoded / OpenWAM parquet reader.
 
-The converted bucket keeps the native Linglong contract: 24-D measured joint
-state ``q`` and 24-D absolute joint target ``q_exp``. The reader normalizes in
-that native space, then optionally scatters both streams into OpenWAM's 80-D
-unified head with per-dimension masks. It does not perform any ROS parsing.
+The reader uses matching joint/joint or EEF/EEF state and action columns,
+normalizes each stream with its own training statistics,
+then optionally scatters both into OpenWAM's 80-D unified space.
 """
 
 from __future__ import annotations
@@ -66,21 +65,13 @@ class LinglongDataset(BaseDataset):
             unify_action=bool(get_cfg(config, "unify_action", True)),
             unify_action_map=get_cfg(config, "unify_action_map", None),
             unify_state_map=get_cfg(config, "unify_state_map", None),
+            action_key=get_cfg(config, "action_key", "action"),
+            state_key=get_cfg(config, "state_key", "observation.state"),
+            action_mode=get_cfg(config, "action_mode", "joint"),
+            normalization_dataset_dir=get_cfg(config, "normalization_dataset_dir", None),
+            active_raw_action_dims=get_cfg(config, "active_raw_action_dims", None),
+            active_raw_state_dims=get_cfg(config, "active_raw_state_dims", None),
         )
-
-    @staticmethod
-    def _resolve_dataset_dir(dataset_dir: Path) -> Path:
-        """Try the alternate local/vePFS mount alias for the converted bucket."""
-        candidates = [dataset_dir]
-        raw = str(dataset_dir)
-        if raw.startswith("/iag_ad_vepfs_volc/iag_ad_vepfs_volc/"):
-            candidates.append(Path("/iag_ad_01/ad/") / raw[len("/iag_ad_vepfs_volc/iag_ad_vepfs_volc/") :])
-        if raw.startswith("/iag_ad_01/ad/"):
-            candidates.append(Path("/iag_ad_vepfs_volc/iag_ad_vepfs_volc/") / raw[len("/iag_ad_01/ad/") :])
-        for candidate in candidates:
-            if candidate.is_dir():
-                return candidate
-        return dataset_dir
 
     def __init__(
         self,
@@ -101,9 +92,35 @@ class LinglongDataset(BaseDataset):
         unify_action: bool = True,
         unify_action_map=None,
         unify_state_map=None,
+        action_key: str = "action",
+        state_key: str = "observation.state",
+        action_mode: str = "joint",
+        normalization_dataset_dir=None,
+        active_raw_action_dims=None,
+        active_raw_state_dims=None,
     ):
         self.dataset_dir = self._resolve_dataset_dir(dataset_dir)
         self.split = str(split)
+        self.action_key = str(action_key)
+        self.state_key = str(state_key)
+        self.action_mode = str(action_mode)
+        if (self.action_key, self.action_mode) not in (("action", "joint"), ("action_eef", "eef_quat")):
+            raise ValueError("Linglong requires action/joint or action_eef/eef_quat")
+        self.raw_action_dim = 16 if self.action_key == "action_eef" else ACTION_DIM
+        if self.state_key not in ("observation.state", "observation.state_eef"):
+            raise ValueError("Linglong state_key must be observation.state or observation.state_eef")
+        if self.state_key == "observation.state_eef" and self.action_key != "action_eef":
+            raise ValueError("EEF state requires action_eef targets")
+        if self.action_key == "action_eef" and self.state_key != "observation.state_eef":
+            raise ValueError("Linglong EEF actions require observation.state_eef; joint-state/EEF-action experiments are retired")
+        self.raw_state_dim = 16 if self.state_key == "observation.state_eef" else STATE_DIM
+        self.raw_action_mask = self._raw_mask(
+            active_raw_action_dims, self.raw_action_dim,
+            16 if self.action_key == "action_eef" else 22,
+        )
+        self.raw_state_mask = self._raw_mask(
+            active_raw_state_dims, self.raw_state_dim, 16 if self.raw_state_dim == 16 else 22,
+        )
         self.num_frames = int(num_frames)
         self.video_stride = int(video_stride)
         self.window_stride = int(window_stride)
@@ -124,15 +141,15 @@ class LinglongDataset(BaseDataset):
             self._action_dst_index = parse_unify_spec(unify_action_map, UNIFY_DIM)
             state_spec = unify_state_map if unify_state_map is not None else unify_action_map
             self._state_dst_index = parse_unify_spec(state_spec, UNIFY_DIM)
-            if self._action_dst_index.shape != (ACTION_DIM,) or self._state_dst_index.shape != (STATE_DIM,):
-                raise ValueError("Linglong unify maps must each map all 24 raw dimensions")
+            if self._action_dst_index.shape != (self.raw_action_dim,) or self._state_dst_index.shape != (self.raw_state_dim,):
+                raise ValueError(f"Linglong maps must cover action={self.raw_action_dim}, state={self.raw_state_dim} dimensions")
             self._action_dim = UNIFY_DIM
             self._state_dim = UNIFY_DIM
         else:
             self._action_dst_index = None
             self._state_dst_index = None
-            self._action_dim = ACTION_DIM
-            self._state_dim = STATE_DIM
+            self._action_dim = self.raw_action_dim
+            self._state_dim = self.raw_state_dim
         if self.num_frames < 2 or self.video_stride < 1:
             raise ValueError("num_frames must be >=2 and video_stride must be >=1")
         if self.num_frames != NUM_FRAMES or self.video_stride != VIDEO_STRIDE:
@@ -148,6 +165,14 @@ class LinglongDataset(BaseDataset):
                 "OPENWAM_LINGLONG_DATASET_DIR) to the mounted converted bucket."
             )
         manifest = json.loads(manifest_path.read_text())
+        if self.state_key == "observation.state_eef":
+            state_contract = manifest.get("observation_state_eef", {})
+            if (state_contract.get("column") != self.state_key or state_contract.get("shape") != [16]
+                    or state_contract.get("reference") != "base_link"
+                    or state_contract.get("quaternion_order") != "wxyz"):
+                raise ValueError("EEF state requires a converted bucket with its 16D base_link/wxyz contract")
+        if self.action_key == "action_eef" and self.split in ("test", "val") and manifest.get("split") == "train":
+            raise ValueError("EEF test/val requires a separate held-out EEF bucket, not the training bucket")
         self._source_root = self._resolve_source_root(manifest.get("source_root"))
         self._prompt = str(manifest["prompt"])
         if not self._source_root.is_dir():
@@ -189,26 +214,73 @@ class LinglongDataset(BaseDataset):
                 )
             self._windows = episode_windows * self.overfit_repeats
 
-        stats = json.loads((self.dataset_dir / "meta" / "normalization_stats.json").read_text())
+        stats_dir = self.dataset_dir
+        if normalization_dataset_dir is not None:
+            # Stats paths must not follow the observation-bucket environment override.
+            stats_dir = self._resolve_dataset_dir(normalization_dataset_dir, use_env=False)
+        elif self.action_key == "action_eef" and self.split in ("test", "val"):
+            raise ValueError("EEF evaluation requires normalization_dataset_dir pointing at the training bucket")
+        stats = json.loads((stats_dir / "meta" / "normalization_stats.json").read_text())
         self._state_stats = {k: np.asarray(v, dtype=np.float32) for k, v in stats["state"].items() if k != "count"}
         self._action_stats = {k: np.asarray(v, dtype=np.float32) for k, v in stats["action"].items() if k != "count"}
+        if self.action_key == "action_eef":
+            if json.loads((stats_dir / "manifest.json").read_text()).get("split") != "train":
+                raise ValueError("EEF normalization statistics must come from the training bucket")
+            eef_stats = json.loads((stats_dir / "meta" / "action_eef_stats.json").read_text())
+            if eef_stats.get("source_column") != "action_eef":
+                raise ValueError("EEF statistics must describe action_eef")
+            self._action_stats = {
+                k: np.asarray(eef_stats["action"]["default"][f"global_{k}"], dtype=np.float32)
+                for k in ("mean", "std", "min", "max", "q01", "q99")
+            }
+            if self.state_key == "observation.state_eef":
+                state_eef_stats = json.loads((stats_dir / "meta" / "state_eef_stats.json").read_text())
+                if state_eef_stats.get("source_column") != self.state_key:
+                    raise ValueError("EEF state statistics must describe observation.state_eef")
+                self._state_stats = {
+                    k: np.asarray(state_eef_stats["state"]["default"][f"global_{k}"], dtype=np.float32)
+                    for k in ("mean", "std", "min", "max", "q01", "q99")
+                }
+        for label, values, dim in (("action", self._action_stats, self.raw_action_dim),
+                                    ("state", self._state_stats, self.raw_state_dim)):
+            for key in ("mean", "std", "min", "max", "q01", "q99"):
+                if values[key].shape != (dim,) or not np.isfinite(values[key]).all():
+                    raise ValueError(f"Invalid {label} normalization statistic {key}, expected {dim} finite values")
         if self.normalize_mode not in (None, "min-max", "z-score", "quantile"):
             raise ValueError(f"unsupported Linglong normalize_mode={self.normalize_mode!r}")
 
         # Training copies this artifact into the checkpoint for deployment.
-        # Keep action and proprio statistics separate while using the standard
-        # OpenWAM "joint" action-mode key.
-        stats_artifact = self.dataset_dir / "meta" / "normalization_stats.npy"
+        # Keep action and proprio statistics separate for deployment.
+        if self.action_key == "action_eef":
+            # Export the exact transforms used above directly into the run.
+            # Never overwrite the joint statistics in the source data copy.
+            self.normalization_stats_payload = {
+                "eef_quat": self._action_stats,
+                "eef_quat_state": self._state_stats,
+            }
+            self.normalization_stats_path = None
+            return
+        stats_artifact = stats_dir / "meta" / "normalization_stats.npy"
         if not stats_artifact.is_file():
             raise FileNotFoundError(f"Linglong deploy normalization artifact is missing: {stats_artifact}")
         self.normalization_stats_path = str(stats_artifact)
+
+    @staticmethod
+    def _raw_mask(dims, width, default_count):
+        indices = np.asarray(list(range(default_count)) if dims is None else list(dims), dtype=np.int64)
+        if (not len(indices) or len(np.unique(indices)) != len(indices)
+                or indices.min() < 0 or indices.max() >= width):
+            raise ValueError(f"Active raw dimensions must be unique indices within [0, {width})")
+        mask = np.zeros(width, dtype=bool)
+        mask[indices] = True
+        return mask
 
     @property
     def action_dim(self) -> int:
         return self._action_dim
 
     @staticmethod
-    def _resolve_dataset_dir(dataset_dir) -> Path:
+    def _resolve_dataset_dir(dataset_dir, *, use_env=True) -> Path:
         """Resolve the converted bucket across local/Volcano mount aliases.
 
         The launcher may pass a path using the vePFS prefix while a worker
@@ -219,7 +291,7 @@ class LinglongDataset(BaseDataset):
         """
         raw = str(dataset_dir)
         candidates = []
-        override = os.environ.get("OPENWAM_LINGLONG_DATASET_DIR")
+        override = os.environ.get("OPENWAM_LINGLONG_DATASET_DIR") if use_env else None
         if override:
             candidates.append(Path(override))
         candidates.append(Path(raw))
@@ -314,8 +386,8 @@ class LinglongDataset(BaseDataset):
         return pq.read_table(
             self._tables[local],
             columns=[
-                "observation.state",
-                "action",
+                self.state_key,
+                self.action_key,
                 "observation.images.head",
                 "observation.images.left",
                 "observation.images.right",
@@ -333,10 +405,20 @@ class LinglongDataset(BaseDataset):
     def __getitem__(self, index: int) -> dict:
         local, start = self._windows[index]
         table = self._read_table(local).slice(start, self.num_frames)
-        state = np.asarray(table["observation.state"].to_pylist(), dtype=np.float32)
-        action = np.asarray(table["action"].to_pylist(), dtype=np.float32)
-        if state.shape != (self.num_frames, STATE_DIM) or action.shape != (self.num_frames, ACTION_DIM):
+        state = np.asarray(table[self.state_key].to_pylist(), dtype=np.float32)
+        action = np.asarray(table[self.action_key].to_pylist(), dtype=np.float32)
+        if state.shape != (self.num_frames, self.raw_state_dim) or action.shape != (self.num_frames, self.raw_action_dim):
             raise ValueError(f"Linglong row shape mismatch: state={state.shape}, action={action.shape}")
+        if not np.isfinite(state).all() or not np.isfinite(action).all():
+            raise ValueError("Non-finite Linglong action/state")
+        if self.action_key == "action_eef":
+            for start_q in (3, 11):
+                if not np.allclose(np.linalg.norm(action[:, start_q:start_q + 4], axis=-1), 1, atol=1e-3):
+                    raise ValueError("action_eef must contain unit wxyz quaternions")
+        if self.state_key == "observation.state_eef":
+            for start_q in (3, 11):
+                if not np.allclose(np.linalg.norm(state[:, start_q:start_q + 4], axis=-1), 1, atol=1e-3):
+                    raise ValueError("observation.state_eef must contain unit wxyz quaternions")
 
         frames = []
         for t in VIDEO_INDICES:
@@ -351,24 +433,24 @@ class LinglongDataset(BaseDataset):
                 frames.append(cams["head"].resize((self.width, self.height), Image.BILINEAR))
 
         # OpenWAM-α always consumes an 80-D unified vector.  Normalize in the
-        # native 24-D joint space first, then scatter into the configured
+        # selected raw action/state spaces first, then scatter into the configured
         # slots; this is the inverse of deployment's gather-then-unnormalize.
         raw_action = self._norm(action[: self.num_frames - 1], self._action_stats)
         raw_proprio = self._norm(state[:1], self._state_stats)
         # The two base placeholders are absent signals, not constant commands.
         # Zero them after normalization so they cannot leak into the action or
         # proprio encoders even though their loss-mask entries are false.
-        raw_action[..., ~RAW_DIM_MASK] = 0.0
-        raw_proprio[..., ~RAW_DIM_MASK] = 0.0
+        raw_action[..., ~self.raw_action_mask] = 0.0
+        raw_proprio[..., ~self.raw_state_mask] = 0.0
         if self.unify_action:
             action_out, action_dim_mask = map_to_unify(raw_action, self._action_dst_index, UNIFY_DIM)
             proprio_out, proprio_dim_mask = map_to_unify(raw_proprio, self._state_dst_index, UNIFY_DIM)
-            action_dim_mask = action_dim_mask & self._scatter_mask(self._action_dst_index)
-            proprio_dim_mask = proprio_dim_mask & self._scatter_mask(self._state_dst_index)
+            action_dim_mask = action_dim_mask & self._scatter_mask(self._action_dst_index, self.raw_action_mask)
+            proprio_dim_mask = proprio_dim_mask & self._scatter_mask(self._state_dst_index, self.raw_state_mask)
         else:
             action_out, proprio_out = raw_action, raw_proprio
-            action_dim_mask = RAW_DIM_MASK
-            proprio_dim_mask = RAW_DIM_MASK
+            action_dim_mask = self.raw_action_mask
+            proprio_dim_mask = self.raw_state_mask
         action_mask = torch.from_numpy(np.broadcast_to(action_dim_mask, action_out.shape).copy())
         proprio_mask = torch.from_numpy(proprio_dim_mask[None, :].copy())
         return {
@@ -386,8 +468,8 @@ class LinglongDataset(BaseDataset):
         }
 
     @staticmethod
-    def _scatter_mask(dst_index: np.ndarray) -> np.ndarray:
+    def _scatter_mask(dst_index: np.ndarray, raw_mask: np.ndarray) -> np.ndarray:
         mask = np.zeros(UNIFY_DIM, dtype=bool)
-        mask[dst_index[RAW_DIM_MASK]] = True
+        mask[dst_index[raw_mask]] = True
         return mask
 __all__ = ["LinglongDataset"]

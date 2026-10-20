@@ -52,6 +52,14 @@ def save_normalization_stats(output_dir: str, dataset) -> None:
         )
         return
     src = getattr(dataset, "normalization_stats_path", None)
+    payload = getattr(dataset, "normalization_stats_payload", None)
+    if payload is not None:
+        import numpy as np
+
+        os.makedirs(output_dir, exist_ok=True)
+        np.save(dst, payload, allow_pickle=True)
+        logger.info("[normalizer] Saved dataset's in-memory transforms to %s", dst)
+        return
     if not src:
         logger.info(
             "[normalizer] Dataset has no normalization_stats_path (normalization likely disabled); "
@@ -150,17 +158,18 @@ def verify_resume_normalization_stats(output_dir: str, dataset) -> None:
     import numpy as np
 
     src = getattr(dataset, "normalization_stats_path", None)
-    if not src:
+    payload = getattr(dataset, "normalization_stats_payload", None)
+    if not src and payload is None:
         return
 
     dst = os.path.join(output_dir, "normalization_stats.npy")
     if not os.path.isfile(dst):
         raise FileNotFoundError(
             f"resume blocked: {dst} is missing while the dataset reports "
-            f"normalization_stats_path={src}. Use finetune_ckpt_path to warm-start "
+            f"normalization stats. Use finetune_ckpt_path to warm-start "
             "with freshly copied stats, or restore the run's normalization_stats.npy."
         )
-    if not os.path.isfile(src):
+    if payload is None and not os.path.isfile(src):
         raise FileNotFoundError(
             f"resume blocked: dataset normalization_stats_path={src} does not exist "
             f"while comparing against checkpoint artifact {dst}."
@@ -168,7 +177,7 @@ def verify_resume_normalization_stats(output_dir: str, dataset) -> None:
 
     try:
         ckpt_payload = np.load(dst, allow_pickle=True).item()
-        data_payload = np.load(src, allow_pickle=True).item()
+        data_payload = payload if payload is not None else np.load(src, allow_pickle=True).item()
     except (OSError, ValueError, EOFError, pickle.UnpicklingError) as exc:
         raise ValueError(
             f"resume blocked: failed to read normalization stats for comparison "

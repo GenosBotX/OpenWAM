@@ -513,7 +513,7 @@ class _UnifyAwareNormalizer:
     # proprio IN: physical raw → normalized-unified (..., unify_dim) the model wants.
     def normalize(self, x):
         arr = np.asarray(x)
-        active = getattr(self, "_active_action_indices", None)
+        active = getattr(self, "_active_state_indices", getattr(self, "_active_action_indices", None))
         if active is not None:
             active_dst = np.asarray(active, dtype=np.int64)
             # Keep only raw dimensions whose destinations are active. This is
@@ -558,6 +558,10 @@ def _build_normalizer(cfg: DictConfig, ckpt_dir: str):
     compact RoboCasa365's state19 and action15 to use distinct raw widths while
     preserving the symmetric map used by older datasets.
     """
+    if (OmegaConf.select(cfg, "dataloader.type") == "linglong"
+            and OmegaConf.select(cfg, "dataloader.action_mode") == "eef_quat"
+            and OmegaConf.select(cfg, "dataloader.state_key", default="observation.state") != "observation.state_eef"):
+        raise ValueError("Linglong EEF checkpoints require observation.state_eef; joint-state/EEF-action experiments are retired")
     inner = _build_inner_normalizer(cfg, ckpt_dir)
 
     unify_on = bool(OmegaConf.select(cfg, "dataloader.unify_action", default=False))
@@ -595,9 +599,22 @@ def _build_normalizer(cfg: DictConfig, ckpt_dir: str):
         unify_dim,
         "then" if inner is not None else "(no stats, gather-only:)",
     )
-    return _UnifyAwareNormalizer(
+    normalizer = _UnifyAwareNormalizer(
         inner,
         action_dst_index,
         unify_dim,
         state_dst_index=state_dst_index,
     )
+    # Action and measured state need independent masks for asymmetric layouts.
+    for field, dst, attr in (
+        ("active_raw_action_dims", action_dst_index, "_active_action_indices"),
+        ("active_raw_state_dims", state_dst_index, "_active_state_indices"),
+    ):
+        dims = OmegaConf.select(cfg, f"dataloader.{field}", default=None)
+        if dims is not None:
+            indices = np.asarray(list(dims), dtype=np.int64)
+            if (len(indices) != len(np.unique(indices))
+                    or (len(indices) and (indices.min() < 0 or indices.max() >= len(dst)))):
+                raise ValueError(f"Invalid {field} for raw width {len(dst)}")
+            setattr(normalizer, attr, dst[indices])
+    return normalizer

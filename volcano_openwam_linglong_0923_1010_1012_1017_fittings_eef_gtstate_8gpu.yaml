@@ -1,0 +1,21 @@
+TaskName: "openwam-linglong-0923-1017-eef-gtstate-8gpu-bs4"
+Description: "Recorded EEF state to EEF action; portable 0923+1010+1012+1017+1017 fittings; 8 GPUs x batch 4 x accumulation 24"
+Tags:
+  - "openwam"
+  - "linglong"
+  - "eef-gtstate"
+  - "1017"
+Entrypoint: >-
+  cd /vePFS/tangyuting/OpenWAM &&
+  exec bash scripts/launch_volcano_linglong_0923_1010_1012_1017_fittings_eef_gtstate_8gpu.sh
+ImageUrl: "${imageUrl}"
+ResourceQueueName: "${resourceQueueName}"
+Framework: "PyTorchDDP"
+TaskRoleSpecs:
+  - RoleName: "worker"
+    RoleReplicas: 1
+    Flavor: "${gpuFlavor}"
+ActiveDeadlineSeconds: "7d"
+DelayExitTimeSeconds: "1h"
+AccessType: "Private"
+Priority: 4

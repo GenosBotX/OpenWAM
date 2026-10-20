@@ -1,7 +1,7 @@
 # Linglong decoded 15 Hz bucket. Raw data stays 24-D joint-space; the reader
 # normalizes it in raw space and scatters it into OpenWAM-alpha's 80-D input.
 type: linglong
-dataset_dir: /iag_ad_01/ad/dushuyue/openpi/data/linglong_0923_openwam_train_15hz
+dataset_dir: /vePFS/data/linglong/linglong_0923_openwam_train_15hz
 
 # Raw layout:
 #   0:7 left arm joints, 7 left gripper, 8:15 right arm joints, 15 right

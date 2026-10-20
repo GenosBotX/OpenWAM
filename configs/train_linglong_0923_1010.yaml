@@ -4,9 +4,9 @@ model:
   video_backbone:
     encoder:
       name: wan22_vae
-      model_path: /iag_ad_01/ad/xiejinxia/code/test/dreamzero/checkpoints/Wan2.2-TI2V-5B
+      model_path: /vePFS/tangyuting/models/Wan2.2-TI2V-5B
     name: wan22_ti2v_5b
-    model_path: /iag_ad_01/ad/xiejinxia/code/test/dreamzero/checkpoints/Wan2.2-TI2V-5B
+    model_path: /vePFS/tangyuting/models/Wan2.2-TI2V-5B
     from_scratch: false
     shift_video: 5.0
     components:
@@ -70,7 +70,7 @@ model:
     idm_video_cond_noise_prob: 0.5
 dataloader:
   type: linglong
-  dataset_dir: /iag_ad_01/ad/xiejinxia/code/test/OpenWAM/data/linglong_0923_1010_openwam_train_15hz
+  dataset_dir: /vePFS/data/linglong/linglong_0923_1010_openwam_train_15hz
   action_mode: joint
   unify_action: true
   unify_action_map:
@@ -145,16 +145,16 @@ training:
   lambda_action: 1.0
   max_timestep_boundary: 1.0
   min_timestep_boundary: 0.0
-  output_path: /iag_ad_01/ad/xiejinxia/code/test/OpenWAM/outputs/linglong_0923_1010_32gpu_official_finetune
+  output_path: /vePFS/tangyuting/OpenWAM/outputs/linglong_0923_1010_32gpu_official_finetune
   save_steps: 200
   save_full_states_for_resume: true
   keep_last_k_ckpts: 2
-  finetune_ckpt_path: /iag_ad_01/ad/xiejinxia/code/test/OpenWAM/assets/openwam_ckpt/openwam_alpha/OpenWAM-Alpha-Pretrain-Foundation-Model
+  finetune_ckpt_path: /vePFS/tangyuting/OpenWAM/assets/openwam_ckpt/openwam_alpha/OpenWAM-Alpha-Pretrain-Foundation-Model
   resume_ckpt_path: null
   dataset_num_workers: 8
 project:
   name: openwam
-  output_dir: /iag_ad_01/ad/xiejinxia/code/test/OpenWAM/outputs/linglong_0923_1010_32gpu_official_finetune/hydra
+  output_dir: /vePFS/tangyuting/OpenWAM/outputs/linglong_0923_1010_32gpu_official_finetune/hydra
   seed: 42
   wandb:
     project: null

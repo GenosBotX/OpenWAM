@@ -1,29 +1,35 @@
 # Linglong 训练、评测与云端推理
 
-本文描述 Linglong 的数据输入、训练适配、离线动作评测、视频生成和云端 WebSocket 服务。命令按本工作区的路径编写。
+本文统一维护 Linglong 数据、训练、火山云任务及评测部署说明。当前 vePFS 训练入口使用 0923 + 1010 + 1012 + 1017 + fittings 的实测 state EEF → action EEF 数据，单机 8 卡、每卡 bs4、梯度累积 24。
 
-## 1. 运行环境和目录
-
-训练、评测和云端推理使用同一套 OpenWAM 环境：
+## 1. vePFS 环境和目录
 
 | 项目 | 路径 |
 | --- | --- |
-| 仓库 | `/iag_ad_01/ad/xiejinxia/code/test/OpenWAM` |
-| Python | `/iag_ad_01/ad/xiejinxia/envs/dreamzero/bin/python` |
-| 合并训练集 | `data/linglong_0923_1010_openwam_train_15hz` |
-| 合并测试集 | `data/linglong_0923_1010_openwam_test_15hz` |
-| 训练配置 | [configs/train_linglong_0923_1010.yaml](../../configs/train_linglong_0923_1010.yaml) |
-| 训练输出根目录 | `outputs/linglong_0923_1010_32gpu_official_finetune` |
+| 仓库 | `/vePFS/tangyuting/OpenWAM` |
+| 公共 Python 环境 | `/vePFS/tangyuting/envs/openwam/bin/python` |
+| Wan2.2 视频模型及 VAE | `/vePFS/tangyuting/models/Wan2.2-TI2V-5B` |
+| Foundation 初始化权重 | `/vePFS/tangyuting/OpenWAM/assets/openwam_ckpt/openwam_alpha/OpenWAM-Alpha-Pretrain-Foundation-Model` |
+| 全量 portable 数据根目录 | `/vePFS/data/linglong/linglong_0923_1010_1012_1017_fittings_eef_gtstate_portable/data` |
+| 训练配置 | [train_linglong_0923_1010_1012_1017_fittings_eef_gtstate_8gpu.yaml](../../configs/train_linglong_0923_1010_1012_1017_fittings_eef_gtstate_8gpu.yaml) |
+| 输出根目录 | `/vePFS/tangyuting/OpenWAM/outputs/linglong_0923_1010_1012_1017_fittings_eef_gtstate_8gpu_bs4_official_finetune` |
+| 启动日志 | `/vePFS/tangyuting/OpenWAM/logs/linglong_1017_eef8/` |
 
-以下评测和部署示例使用已有 run `2026-10-12_01-59-42`。评测脚本自动选择该目录中 step 编号最大的权重；示例服务启动命令显式指定 `checkpoint_step_400.safetensors`。评测其他训练结果时，将 checkpoint 目录换成目标 run。
+启动脚本自动加载公共环境；手动使用环境时，在 Bash 中执行：
 
-Python 依赖声明在 [pyproject.toml](../../pyproject.toml)。离线推理需要 CUDA、PyTorch 和模型资源；数据读取使用 PyArrow、Pillow、NumPy；视频导出使用 imageio/ffmpeg；WebSocket 服务使用 websockets。以下命令直接调用已配置的环境，不修改其依赖。
+```bash
+source /vePFS/tangyuting/OpenWAM/scripts/activate_vepfs_openwam.sh
+```
+
+激活脚本设置 Python、PYTHONPATH、公共 Hugging Face 缓存及离线 W&B，并切换至仓库。训练 worker 需要挂载上述相同的 vePFS 路径。依赖声明见 [pyproject.toml](../../pyproject.toml)。
+
+本文第 2.1–2.4 节保留原有 0923+1010 关节版本的数据语义，第 2.5 节介绍当前 EEF 版本。第 4、5 节保留关节 checkpoint 的评测和服务示例，其历史 run 和对应数据需另行准备，不能套用其 24 维关节语义解释 EEF 输出。
 
 ## 2. 数据与训练输入
 
 ### 2.1 24 维状态和动作
 
-Linglong 使用关节空间表示：
+原有 0923+1010 配置使用关节空间表示：
 
 - `observation.state`：24 维测量关节位置 `q`。
 - `action`：24 维绝对目标关节位置 `q_exp`。
@@ -48,7 +54,7 @@ Linglong 使用关节空间表示：
 
 [scripts/convert_linglong.py](../../scripts/convert_linglong.py) 读取 processed 数据中的 `inventory.json`、`aligned.csv` 和 `alignment.jsonl`，按头部时间戳在 15 Hz 网格上选择最近记录，输出 episode parquet、图像路径、元数据和归一化统计。该脚本的固定 prompt 包含 blue block；多颜色采集应在 episode 元数据中使用对应任务描述。
 
-当前合并数据的 manifest 记录：
+原有 0923+1010 关节合并数据的 manifest 记录：
 
 | 数据集 | episode 数 | 原始帧数 |
 | --- | --- | --- |
@@ -99,54 +105,91 @@ Use the right arm to pick up the block from the table and place it in the box.
 
 `active_raw_action_dims` 为 `0..21`。底盘占位在归一化后置零并从有效掩码中排除。推理由 [model_loader.py](../../openwam/deploy/model_loader.py) 和 [base.py](../../openwam/model/architectures/base.py) 处理有效维度，输出经过 80→24 维提取和反归一化，底盘两维置零。
 
-映射、统计和图像配置以所加载 checkpoint 的 `config.yaml` 为准。`configs/dataloader/linglong.yaml` 是独立的数据配置入口；本文命令通过 `train_linglong_0923_1010` 完整配置启动。
+映射、统计和图像配置以所加载 checkpoint 的 `config.yaml` 为准。`configs/dataloader/linglong.yaml` 是独立的数据配置入口；原有关节完整配置为 `train_linglong_0923_1010`。当前第 3 节启动命令使用第 2.5 节的 EEF 配置。
 
-## 3. 训练启动与 checkpoint
+### 2.5 全量实测 state EEF → action EEF
 
-### 3.1 训练配置
+当前使用上传的 portable 数据，覆盖 0923、1010、1012、1017、1017_fittings，保留各 episode 的具体物体指令。
 
-初始化权重由 `training.finetune_ckpt_path` 指定：
+| 数据集 | 目录（相对于第 1 节数据根目录） | episode 数 | 窗口数 |
+| --- | --- | --- | --- |
+| 训练 | `linglong_0923_1010_1012_1017_fittings_eef_gtstate_train_15hz` | 721 | 116,373 |
+| 测试 | `linglong_0923_1010_1012_1017_fittings_eef_gtstate_test_15hz` | 82 | 14,553 |
 
-```text
-assets/openwam_ckpt/openwam_alpha/OpenWAM-Alpha-Pretrain-Foundation-Model
-```
+输入 `observation.state_eef` 为记录的双臂实测末端位姿；目标 `action_eef` 为数据中已有的绝对末端目标。两者均为 16 维：左臂 xyz、wxyz 四元数、夹爪，再接右臂对应字段。坐标系为 `base_link`，位置单位为米，`action_mode=eef_quat`。这是绝对 EEF 目标训练。
 
-模型为 dual_system / joint_self_attn，使用 Wan2.2 TI2V-5B 视频骨干，state/action 维度均为 80。训练更新 ActionDiT、视频 DiT 及未冻结的联合模块；VAE、文本编码器和配置中列出的编码模块保持冻结。视频与动作损失权重均为 1。
+状态和动作分别使用训练集 `meta/state_eef_stats.json`、`meta/action_eef_stats.json` 归一化，测试复用训练统计。映射均为 `["0-6", 9, "34-40", 43]`，原始 16 维均有效。模型接收 `(32, 80)` 动作和 `(1, 80)` proprio，视频窗口仍为 9 帧。
+
+### 2.6 allstuff 与原始 prompt 版本
+
+上游提交 `817b76e968ac5584ac9e07d28effe66e1acdc2c4`（2026-10-20 16:22，北京时间）引入 [allstuff 配置](../../configs/train_linglong_0923_1010_1012_1017_fittings_eef_gtstate_allstuff_8gpu.yaml) 和对应脚本。
+
+allstuff 对同一批采集数据扩充语言指令：保留 714 条具体物体指令，复制这 714 条轨迹并改用 “pick up all stuff” 指令；另外 7 条原有 “all blocks” 指令直接改为 “all stuff”。训练条目共 1,435 条、227,815 个窗口，没有增加采集轨迹。state/action 仍为 16 维 EEF。
+
+当前 portable 训练配置继承 allstuff 的训练参数，但覆盖了数据目录，实际使用原始 prompt 的 721 条训练集。第 3 节命令启动的是这个原始 prompt 版本。
+
+### 2.7 原有配置的数据路径和可用状态
+
+原有配置的模型地址已改为第 1 节公共模型路径，数据根目录已改为 `/vePFS/data/linglong/`，保留各版本名：
+
+| 配置 | 相对于 `/vePFS/data/linglong/` 的数据目录 | 2026-10-20 检查状态 |
+| --- | --- | --- |
+| `dataloader/linglong` | `linglong_0923_openwam_train_15hz` | 配置路径下缺少数据 |
+| `train_linglong_0923_1010` | `linglong_0923_1010_openwam_train_15hz` | 配置路径下缺少数据 |
+| `…eef_gtstate_allstuff_8gpu` | `linglong_0923_1010_1012_1017_fittings_eef_gtstate_allstuff_train_15hz` | 配置路径下缺少数据；portable 内已有同名子目录 |
+
+allstuff 数据实际位于 `/vePFS/data/linglong/linglong_0923_1010_1012_1017_fittings_eef_gtstate_portable/data/linglong_0923_1010_1012_1017_fittings_eef_gtstate_allstuff_train_15hz`。这里只记录其存在及配置路径差异；当前验证通过的训练入口是第 3 节的原始 prompt portable 版本。上游原有 32 卡和 allstuff 启动脚本仍含原环境路径，使用那些入口前需要另行适配脚本，更新 YAML 路径不会自动更新脚本。
+
+## 3. 火山云训练启动与 checkpoint
+
+### 3.1 当前训练配置
+
+以第 1 节 Foundation 权重开始新一轮微调，默认 `resume_ckpt_path=null`。模型为 dual_system / joint_self_attn，使用 Wan2.2 TI2V-5B，统一 state/action 宽度为 80。
 
 | 参数 | 配置值 |
 | --- | --- |
-| GPU 数 | 4 节点 × 8 GPU = 32 |
-| 每 GPU batch size | 1 |
+| GPU 数 | 1 worker × 8 GPU |
+| 每 GPU batch size | 4 |
 | 梯度累积 | 24 |
-| 完整累积周期的有效 batch size | `1 × 32 × 24 = 768` |
-| 学习率 | `1e-4` |
+| 有效 batch size | `4 × 8 × 24 = 768` |
+| 学习率 / epoch | `1e-4` / 5 |
 | scheduler | cosine，warmup ratio 0.05 |
-| epoch | 5 |
 | 精度 / 分片 | bf16 / DeepSpeed ZeRO-2 |
 | 梯度检查点 | 开启 |
 | 保存间隔 / 保留数 | `save_steps=200` / `keep_last_k_ckpts=2` |
 | 完整训练状态 | `save_full_states_for_resume=true` |
 
-### 3.2 火山云入口命令
+### 3.2 火山云任务与入口命令
 
-在配置了 4 个 worker、每 worker 8 GPU 的火山云任务中设置：
+在火山云训练控制台复用已有可用任务的镜像、资源队列及 vePFS 挂载，选择 **1 个 worker，每个 worker 8 张 GPU**。将启动命令设置为：
 
 ```bash
-cd /iag_ad_01/ad/xiejinxia/code/test/OpenWAM && \
-NPROC=8 EXPECTED_WORLD_SIZE=32 \
-bash scripts/launch_volcano_linglong_0923_1010_32gpu.sh
+cd /vePFS/tangyuting/OpenWAM && \
+bash scripts/launch_volcano_linglong_0923_1010_1012_1017_fittings_eef_gtstate_8gpu.sh
 ```
 
-[启动脚本](../../scripts/launch_volcano_linglong_0923_1010_32gpu.sh) 解析平台 worker 主机列表、节点 rank 和 master 地址，检查总 GPU 数，然后通过 torch.distributed.run 启动 [scripts/train.py](../../scripts/train.py)。脚本使用固定的合并数据配置，清除 `OPENWAM_LINGLONG_DATASET_DIR` 和 `OPENWAM_LINGLONG_SOURCE_ROOT` 环境覆盖。
+这是任务容器内的训练入口；在开发机执行它不会向平台申请 GPU。平台任务提交后，训练在 worker 内运行，不依赖本地 SSH 窗口存活。
 
-任务模板为 [volcano_openwam_linglong_0923_1010_32gpu.yaml](../../volcano_openwam_linglong_0923_1010_32gpu.yaml)。镜像、队列和 GPU 规格在提交任务时按平台配置填写。
+[启动脚本](../../scripts/launch_volcano_linglong_0923_1010_1012_1017_fittings_eef_gtstate_8gpu.sh) 自动激活公共环境、检查模型和数据文件，并通过 `python -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node=8 scripts/train.py` 启动训练。脚本清除旧的数据环境变量覆盖；收到多 worker 配置时退出并报错。无需手动填写 `MLP_WORKER_ALL_HOSTS`，不要复制 `worker-0,worker-1,…` 示例占位主机名。
 
-### 3.3 输出与恢复训练
+[任务 YAML 模板](../../volcano_openwam_linglong_0923_1010_1012_1017_fittings_eef_gtstate_8gpu.yaml) 与以上入口一致。控制台启动时镜像、队列和 GPU 规格由任务表单配置，不需要在训练命令中写 `--set`。如果使用 CLI 提交 YAML，模板中的 `imageUrl`、`resourceQueueName`、`gpuFlavor` 仍需要由已有提交流程替换；该模板本身不自动发现资源。
 
-每次训练生成时间戳 run 目录，包含以下文件：
+开发机上可以先执行只检查资产、不启动训练的命令：
+
+```bash
+cd /vePFS/tangyuting/OpenWAM && \
+OPENWAM_LAUNCH_DRYRUN=1 \
+bash scripts/launch_volcano_linglong_0923_1010_1012_1017_fittings_eef_gtstate_8gpu.sh
+```
+
+### 3.3 日志、输出和恢复训练
+
+真实启动日志写入 `/vePFS/tangyuting/OpenWAM/logs/linglong_1017_eef8/launch_*.log`，同时输出到平台 worker 日志。若任务立即结束且没有共享日志，应检查平台实例日志、入口命令、镜像和挂载；共享环境加载失败可能发生在日志文件创建之前。
+
+输出根目录为：
 
 ```text
-outputs/linglong_0923_1010_32gpu_official_finetune/<run>/
+/vePFS/tangyuting/OpenWAM/outputs/linglong_0923_1010_1012_1017_fittings_eef_gtstate_8gpu_bs4_official_finetune/<run>/
   config.yaml
   checkpoint_step_<N>.safetensors
   normalization_stats.npy
@@ -156,17 +199,26 @@ outputs/linglong_0923_1010_32gpu_official_finetune/<run>/
     ... Accelerate / DeepSpeed 状态文件 ...
 ```
 
-完整状态由全部 rank 参与保存，在梯度累积完成的优化器边界写入；`trainer_state.json` 作为保存完成标记最后写入。它保存模型、优化器、调度器、随机数状态及训练进度。恢复时校验训练上下文和归一化统计，复用对应 run 目录。
-
-对具备完整状态的目标 run，向启动脚本追加：
+完整状态由全部 rank 在优化器更新边界参与保存，`trainer_state.json` 为保存完成标记。恢复已有训练时，向启动脚本追加以下两项：
 
 ```text
+training.finetune_ckpt_path=null
 training.resume_ckpt_path=/绝对路径/目标run目录
 ```
 
-权重初始化使用 `training.finetune_ckpt_path`；完整进度恢复使用 `training.resume_ckpt_path`。后者要求存在可用的 `accel_state_step_*`。本文示例 run `2026-10-12_01-59-42` 当前包含推理权重，没有完整恢复状态。
+恢复目录必须具有可用的 `accel_state_step_*`；只有 safetensors 权重时应使用 `finetune_ckpt_path` 开始新 run。
 
-## 4. 离线推理、动作评测与视频生成
+### 3.4 本地适配范围与验证
+
+本地适配基于上游 `817b76e968ac5584ac9e07d28effe66e1acdc2c4`。新增一套 portable EEF 配置、单机 8 卡启动脚本、任务模板和公共环境激活脚本；原有 Linglong 配置仅改模型、数据及输出路径。本说明统一维护于 `assets/openwam_usage_docs/linglong.md`。
+
+当前 codediff：`/vePFS/tangyuting/codediff/openwam_current/`，包含 `BASE_COMMIT`、`adaptation.patch`、文件清单和验证记录。旧适配已备份到 `/vePFS/tangyuting/backups/`。
+
+已验证配置解析、模型文件、五批数据的 train/test 样本读取、启动脚本语法及 dry-run。文档和路径同步本身不代表新提交的 GPU 训练已成功运行。
+
+## 4. 关节版本的离线推理、动作评测与视频生成
+
+本节为原有 24 维关节版本示例。历史 run `2026-10-12_01-59-42` 和 0923+1010 数据需先放到对应位置；示例不表示这些资源已存在于 vePFS。EEF 评测应按 checkpoint 配置选择 16 维 EEF 字段和对应统计，不能直接采用本节关节部位指标。
 
 离线脚本直接在 `cuda:0` 加载 checkpoint，通过 `JointInferenceEngine.generate()` 推理。每个窗口的输入为起始多视角图像、起始测量 q 和 prompt，输出为完整的 32 帧动作块；开启视频解码后同时获得 9 帧采样视频。
 
@@ -180,17 +232,17 @@ training.resume_ckpt_path=/绝对路径/目标run目录
 在运行评测的终端先设置工作目录，并清除数据路径覆盖：
 
 ```bash
-cd /iag_ad_01/ad/xiejinxia/code/test/OpenWAM
+cd /vePFS/tangyuting/OpenWAM
 unset OPENWAM_LINGLONG_DATASET_DIR OPENWAM_LINGLONG_SOURCE_ROOT
 ```
 
 ### 4.1 单 episode 推理和视频
 
 ```bash
-/iag_ad_01/ad/xiejinxia/envs/dreamzero/bin/python \
+/vePFS/tangyuting/envs/openwam/bin/python \
   scripts/eval_linglong_train.py \
   --checkpoint-dir outputs/linglong_0923_1010_32gpu_official_finetune/2026-10-12_01-59-42 \
-  --dataset-dir data/linglong_0923_1010_openwam_train_15hz \
+  --dataset-dir /vePFS/data/linglong/linglong_0923_1010_openwam_train_15hz \
   --episode 0 --chunk-stride 32 --max-windows 1000 \
   --denoise-steps 10 --seed 42 \
   --decode-video \
@@ -202,10 +254,10 @@ unset OPENWAM_LINGLONG_DATASET_DIR OPENWAM_LINGLONG_SOURCE_ROOT
 ### 4.2 全测试集推理和视频
 
 ```bash
-/iag_ad_01/ad/xiejinxia/envs/dreamzero/bin/python \
+/vePFS/tangyuting/envs/openwam/bin/python \
   scripts/eval_linglong_test_all.py \
   --checkpoint-dir outputs/linglong_0923_1010_32gpu_official_finetune/2026-10-12_01-59-42 \
-  --dataset-dir data/linglong_0923_1010_openwam_test_15hz \
+  --dataset-dir /vePFS/data/linglong/linglong_0923_1010_openwam_test_15hz \
   --chunk-stride 32 --max-windows 1000 \
   --denoise-steps 10 --seed 42 \
   --decode-video \
@@ -238,7 +290,7 @@ outputs/linglong_eval/test_all/
 所有误差保留原始动作单位。夹爪和关节数值汇总时应同时参考逐维、分部位指标。分部位统计命令：
 
 ```bash
-/iag_ad_01/ad/xiejinxia/envs/dreamzero/bin/python \
+/vePFS/tangyuting/envs/openwam/bin/python \
   scripts/summarize_linglong_body_mae.py \
   outputs/linglong_eval/test_all
 ```
@@ -253,7 +305,9 @@ outputs/linglong_eval/test_all/
 
 该工具当前固定引用 `checkpoint_step_154000.safetensors`，适用于具有该文件的 Foundation 包。权重通过符号链接引用，源目录需要保持可访问。
 
-## 5. 开启云端 WebSocket 服务
+## 5. 关节版本的云端 WebSocket 服务
+
+本节描述 24 维关节 checkpoint 的消息语义。使用 EEF checkpoint 时，需要客户端按其 16 维末端位姿布局提供实测 state 并解释输出；本节关节目标的执行方式不适用于 EEF。
 
 ### 5.1 启动命令
 
@@ -269,8 +323,8 @@ scripts/deploy.sh → scripts/deploy.py → PolicyServer
 在云端终端执行以下命令，服务以前台方式运行：
 
 ```bash
-cd /iag_ad_01/ad/xiejinxia/code/test/OpenWAM && \
-PATH=/iag_ad_01/ad/xiejinxia/envs/dreamzero/bin:$PATH \
+cd /vePFS/tangyuting/OpenWAM && \
+PATH=/vePFS/tangyuting/envs/openwam/bin:$PATH \
 NUM_GPUS=1 \
 bash scripts/deploy.sh \
   outputs/linglong_0923_1010_32gpu_official_finetune/2026-10-12_01-59-42 \
@@ -293,7 +347,7 @@ bash scripts/deploy.sh \
 
 ```bash
 ssh -o ExitOnForwardFailure=yes -N \
-  -L 8848:127.0.0.1:8848 <cloud-user>@<cloud-host>
+  -L 8848:127.0.0.1:8848 'cloud-user@cloud-host'
 ```
 
 客户端连接 `ws://127.0.0.1:8848`。云端 PolicyServer 持有动作缓存和 reset 状态，机器人联调时使用独占的服务实例。
@@ -329,8 +383,8 @@ ssh -o ExitOnForwardFailure=yes -N \
 在云端另开终端运行：
 
 ```bash
-cd /iag_ad_01/ad/xiejinxia/code/test/OpenWAM
-/iag_ad_01/ad/xiejinxia/envs/dreamzero/bin/python \
+cd /vePFS/tangyuting/OpenWAM
+/vePFS/tangyuting/envs/openwam/bin/python \
   scripts/inference_test/inference_single_test.py \
   --server ws://127.0.0.1:8848 \
   --test --state-dim 24

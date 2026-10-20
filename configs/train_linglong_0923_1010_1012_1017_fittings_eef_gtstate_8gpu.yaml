@@ -1,0 +1,21 @@
+# Full uploaded portable data; inherit the upstream state EEF -> action EEF recipe.
+defaults:
+  - train_linglong_0923_1010_1012_1017_fittings_eef_gtstate_allstuff_8gpu
+  - _self_
+
+model:
+  video_backbone:
+    encoder:
+      model_path: /vePFS/tangyuting/models/Wan2.2-TI2V-5B
+    model_path: /vePFS/tangyuting/models/Wan2.2-TI2V-5B
+
+dataloader:
+  dataset_dir: /vePFS/data/linglong/linglong_0923_1010_1012_1017_fittings_eef_gtstate_portable/data/linglong_0923_1010_1012_1017_fittings_eef_gtstate_train_15hz
+  normalization_dataset_dir: /vePFS/data/linglong/linglong_0923_1010_1012_1017_fittings_eef_gtstate_portable/data/linglong_0923_1010_1012_1017_fittings_eef_gtstate_train_15hz
+
+training:
+  finetune_ckpt_path: /vePFS/tangyuting/OpenWAM/assets/openwam_ckpt/openwam_alpha/OpenWAM-Alpha-Pretrain-Foundation-Model
+  output_path: /vePFS/tangyuting/OpenWAM/outputs/linglong_0923_1010_1012_1017_fittings_eef_gtstate_8gpu_bs4_official_finetune
+
+project:
+  output_dir: /vePFS/tangyuting/OpenWAM/outputs/linglong_0923_1010_1012_1017_fittings_eef_gtstate_8gpu_bs4_official_finetune/hydra

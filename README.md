@@ -1,3 +1,5 @@
+> Linglong TOS adaptation: [bounded cache and training guide](assets/openwam_usage_docs/linglong_tos.md).
+
 <p align="center">
   <img src="assets/repo_images/openwam_title.png" alt="OpenWAM" width="60%">
 </p>

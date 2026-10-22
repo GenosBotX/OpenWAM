@@ -1,0 +1,23 @@
+# Full Linglong EEF training. Override dataset URI after publishing all episodes.
+defaults:
+  - train_linglong_0923_1010_1012_1017_fittings_eef_gtstate_8gpu
+  - _self_
+
+dataloader:
+  dataset_dir: ${oc.env:LINGLONG_TOS_DATASET}
+  normalization_dataset_dir: ${dataloader.dataset_dir}
+  eval_dataset_dir: null
+  cache_dir: ${oc.env:OPENWAM_TOS_CACHE_DIR,/tmp/openwam-tos-cache}
+  cache_max_bytes: 4294967296  # 4 GiB per node, shared by all ranks/workers
+  cache_min_free_bytes: 1073741824
+  window_stride: 4
+
+training:
+  output_path: outputs/linglong_tos
+  save_full_states_for_resume: false
+  keep_last_k_ckpts: 1
+
+project:
+  output_dir: ${training.output_path}/hydra
+  wandb:
+    project: null

@@ -359,6 +359,11 @@ class OpenWAMTrainer:
                     global_step += 1
 
                     metrics = reduce_step_metrics(self.accelerator, losses, grad_norm)
+                    if getattr(self.dataset, "tos_cache", None) is not None:
+                        self._last_tos_metrics = {k: float(v) for k, v in metrics.items()}
+                        if is_main:
+                            logger.info("TOS training micro_step=%d optimizer_step=%d loss=%.6f grad_norm=%.6f",
+                                        global_step, opt_step, metrics["loss_total"], metrics["grad_norm"])
 
                     current_lr = optimizer.param_groups[0]["lr"]
                     _now = _time.monotonic()
@@ -422,7 +427,12 @@ class OpenWAMTrainer:
             video_lr=float(t.video_lr) if getattr(t, "video_lr", None) else None,
         )
         betas = tuple(getattr(t, "adam_betas", [0.9, 0.95]))
-        return torch.optim.AdamW(params, lr=float(t.learning_rate), weight_decay=float(t.weight_decay), betas=betas)
+        # foreach creates full parameter-sized temporary buffers. Allow smaller
+        # two-GPU smoke jobs to use the memory-efficient scalar implementation.
+        foreach = getattr(t, "optimizer_foreach", None)
+        return torch.optim.AdamW(
+            params, lr=float(t.learning_rate), weight_decay=float(t.weight_decay), betas=betas, foreach=foreach,
+        )
 
     # (4) Called by train() — build the training DataLoader (seeded generator when reproducible).
     def build_dataloader(self, batch_size: int) -> torch.utils.data.DataLoader:
@@ -769,3 +779,12 @@ class OpenWAMTrainer:
         self.accelerator.wait_for_everyone()
         if wandb_run is not None:
             wandb_run.finish()
+        cache = getattr(self.dataset, "tos_cache", None)
+        if cache is not None and is_main:
+            import json
+            from pathlib import Path
+
+            report = {"global_step": global_step, "optimizer_step": opt_step,
+                      "metrics": getattr(self, "_last_tos_metrics", {}), "cache": cache.stats()}
+            Path(output_path).mkdir(parents=True, exist_ok=True)
+            (Path(output_path) / "tos_training_report.json").write_text(json.dumps(report, indent=2) + "\n")

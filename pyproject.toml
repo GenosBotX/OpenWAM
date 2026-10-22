@@ -48,6 +48,7 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
+tos = ["tos>=2.8,<3"]
 dev = [
     "labtasker==2.6.0",
     "pytest>=8,<10",

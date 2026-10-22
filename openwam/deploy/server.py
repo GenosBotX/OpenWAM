@@ -382,6 +382,8 @@ def build_server_from_config(
     device: str = "cuda",
     ckpt_name: Optional[str] = None,
     readiness_token: str | None = None,
+    *,
+    server_class=None,
 ):
     """Build a PolicyServer from a self-contained checkpoint directory.
 
@@ -401,7 +403,8 @@ def build_server_from_config(
     training_cfg, architecture = load_from_checkpoint_dir(ckpt_dir, device=device, ckpt_name=ckpt_name)
     merged = merge_deploy_cfg(training_cfg, deploy_cfg)
     engine = JointInferenceEngine(cfg=merged, architecture=architecture)
-    return PolicyServer(engine=engine, cfg=merged, readiness_token=readiness_token)
+    policy_server_class = PolicyServer if server_class is None else server_class
+    return policy_server_class(engine=engine, cfg=merged, readiness_token=readiness_token)
 
 
 _HALF_PRECISION_CUDA_ONLY = " (CUDA fp16/bf16 only; torch_sdpa otherwise)"
@@ -695,8 +698,8 @@ def resolve_deploy_args(args):
     return cfg, ckpt_dir
 
 
-def main(argv: Optional[list[str]] = None):
-    """CLI entrypoint for running the OpenWAM policy server."""
+def main(argv: Optional[list[str]] = None, *, server_class=None):
+    """CLI entrypoint with an optional robot-specific server class."""
     from omegaconf import OmegaConf
 
     parser = _build_argparser()
@@ -725,6 +728,7 @@ def main(argv: Optional[list[str]] = None):
         device=device,
         ckpt_name=args.ckpt_name,
         readiness_token=args.readiness_token,
+        **({"server_class": server_class} if server_class is not None else {}),
     )
     logging.getLogger("deploy").info(
         "Inference engine ready — steps=%d denoise_mode=%s",

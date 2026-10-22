@@ -221,3 +221,6 @@ assets/*
 
 # Local Labtasker state and attempt journals
 .labtasker/
+
+# 本地推理服务日志、进程记录和检查结果
+/logs/

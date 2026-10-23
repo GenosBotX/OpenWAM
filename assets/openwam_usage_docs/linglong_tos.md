@@ -1,125 +1,59 @@
-# Linglong Training From TOS
+# Linglong TOS 数据使用
 
-This repo keeps the Linglong EEF training contract and reads immutable converted
-Linglong buckets from TOS. Parquet, normalization metadata, and JPEGs are fetched
-on demand into a per-node disk cache shared by all local ranks and DataLoader
-workers. The default production quota is 4 GiB per node, with a 1 GiB free-space
-guard. Cache settings must match for every process sharing a cache directory.
+完整的数据语义、缓存行为、训练参数和 checkpoint 说明见 [Linglong EEF 数据读取与训练](linglong.md)。TOS 和本地训练共用 `LinglongDataset`，不改变 EEF 定义、归一化或采样方式。
 
-## Publish A Dataset Version
+## 当前训练数据与入口
 
-Install the optional client and provide credentials through environment variables
-or a mode-0600 JSON credential file outside the repo:
+完整训练前缀：
 
-```bash
-pip install -e '.[tos]'
-export TOS_ACCESS_KEY=...
-export TOS_SECRET_KEY=...
+```text
+tos://ml-platform-auto-created-required-2109640594-cn-beijing/linglong/openwam/linglong/20261022_0923_1017_eef_v1
 ```
 
-Publish a small fixture first, then a full version under a new prefix. The script
-uploads referenced images and parquet files, then metadata, and writes
-`manifest.json` last. A prefix with a manifest is immutable and cannot be reused.
-The subset keeps the original full training EEF normalization statistics.
+在配置好 1 worker × 8 GPU 和 vePFS 挂载的 Volcano 任务中执行：
 
 ```bash
-python -m scripts.publish_linglong_tos \
-  --source /vePFS/data/linglong/CONVERTED_TRAIN_BUCKET \
-  --destination tos://BUCKET/linglong/openwam/linglong/2026-10-v1 \
-  --episodes 2
-
-# Full dataset: omit --episodes. Upload progress includes bytes and object count.
-python -m scripts.publish_linglong_tos \
-  --source /vePFS/data/linglong/CONVERTED_TRAIN_BUCKET \
-  --destination tos://BUCKET/linglong/openwam/linglong/2026-10-v2
+cd /vePFS/tangyuting/OpenWAM-tos && \
+bash scripts/launch_volcano_linglong_tos_eef_8gpu_bs6.sh
 ```
 
-Set `TOS_ENDPOINT` and `TOS_REGION` only when the bucket is outside the default
-Beijing region. `TOS_SECURITY_TOKEN` is supported for temporary credentials.
+每卡 bs6、accum24、窗口步长 1、视频步长 4、5 epochs。288×256 输入改用 `scripts/launch_volcano_linglong_tos_eef_8gpu_bs6_h288_w256.sh`。
 
-## Start Training
+launcher 默认从 `/vePFS/tangyuting/.config/openwam/tos-linglong.json` 加载凭证；该文件需归任务用户所有、权限 0600。可用 `TOS_CREDENTIAL_FILE` 覆盖路径。文件包含 `TOS_ACCESS_KEY`、`TOS_SECRET_KEY`，以及可选的 `TOS_SECURITY_TOKEN`、`TOS_ENDPOINT`、`TOS_REGION`；不要将凭证写入仓库。
 
-The full recipe uses the 16D `observation.state_eef` / `action_eef` pair, the
-existing EEF normalization artifacts, 33 control frames, video stride 4, and
-window stride 1 (matching the local Linglong Base recipe). The default cache is shared at `/tmp/openwam-tos-cache` on each
-node. Override `OPENWAM_TOS_CACHE_DIR` and the cache quota in the config for the
-node's local disk budget.
+使用任务注入的凭证环境变量时，可直接运行通用入口：
 
 ```bash
-export LINGLONG_TOS_DATASET=tos://BUCKET/linglong/openwam/linglong/2026-10-v2
-export TOS_ACCESS_KEY=...
-export TOS_SECRET_KEY=...
-NPROC_PER_NODE=8 scripts/train_linglong_tos.sh
+export LINGLONG_TOS_DATASET=tos://ml-platform-auto-created-required-2109640594-cn-beijing/linglong/openwam/linglong/20261022_0923_1017_eef_v1
+NPROC_PER_NODE=8 bash scripts/train_linglong_tos.sh
 ```
 
-On Volcano, expose credentials through the job's secret environment or point
-`TOS_CREDENTIAL_FILE` at a JSON file owned by the job user with mode `0600`.
-The launcher validates the dataset URI and uses the regular OpenWAM training
-entrypoint. Checkpoints are written to `training.output_path` on local/vePFS
-storage. Upload completed checkpoints separately after the run; active checkpoint
-directories are not mirrored to TOS.
+## 缓存配置
 
-For a bounded end-to-end smoke test, set `OPENWAM_TOS_CONFIG=train_linglong_tos_smoke`.
-It runs one optimizer step with batch size 1 and an 8 MiB cache to exercise
-eviction. It freezes the video backbone and trains ActionDiT plus the proprio
-encoder on two 80 GB GPUs, disables AdamW foreach temporary buffers, and writes
-no training checkpoint. This validates the data/training path; use the full
-recipe on the usual larger GPU allocation for joint video/action fine-tuning.
+对象按需下载到 `${OPENWAM_TOS_CACHE_DIR:-/tmp/openwam-tos-cache}`；同节点 rank/worker 共享 4 GiB 内容缓存，保留 1 GiB 空闲空间。缓存目录使用节点本地 Linux 磁盘，全部使用者须设置相同限额；修改限额请切换目录。
 
-## Cache Behavior
+DataLoader 每 rank 8 个 worker，默认每 worker 提前准备 2 个 batch。预取与模型计算重叠，缓存不足时以 LRU 淘汰；没有全量本地副本或独立全量预取服务。磁盘限额不包含解码后图像、prefetch 队列和 parquet 的主机内存。
 
-- Objects are keyed by their full TOS URI and downloaded with ETag matching.
-- Per-object striped file locks deduplicate concurrent misses and pin active reads.
-- A SQLite LRU index reserves space before download and evicts only unleased files.
-- Oversized objects and insufficient free space fail explicitly; the reader never
-  silently falls back to a local dataset copy.
-- The TOS dataset prefix must remain immutable. Do not overwrite objects after
-  publishing `manifest.json`.
-- Cache statistics and the last training step's loss/gradient are written to
-  `tos_training_report.json` in the actual run directory (the trainer creates a
-  timestamped child under `training.output_path`). The quota covers cached object
-  payloads and in-flight reservations; SQLite and lock files add small overhead.
+```bash
+OPENWAM_TOS_CACHE_DIR=/tmp/openwam-tos-cache-8g \
+bash scripts/launch_volcano_linglong_tos_eef_8gpu_bs6.sh \
+  dataloader.cache_max_bytes=8589934592
+```
 
-`python -m scripts.check_linglong_tos` compares actions, state, masks, prompts,
-and every rendered multiview frame against the original vePFS dataset. The full
-dataset is not copied for this check.
+## 发布数据
 
-## Validation On 2026-10-22
-
-The isolated published fixture contains the first two complete episodes: 1,130
-objects, approximately 52.2 MB. Full data has **not** been published.
-
-Dataset URI:
-`tos://ml-platform-auto-created-required-2109640594-cn-beijing/linglong/openwam/linglong/20261022_smoke_v1`
-
-- Eight windows exactly matched the original vePFS data: EEF action/state,
-  masks, prompts and all decoded multiview frames. With a 64 MiB cache, first
-  pass took 12.882 s, repeat pass 2.728 s, and two-worker pass 0.881 s.
-- Two A800 80 GB GPUs completed one real optimizer step using the Foundation
-  checkpoint, bf16, ZeRO-2, batch 1/rank, accumulation 1, and frozen video backbone.
-  The step took approximately 6.1 s, excluding several minutes of model loading
-  and setup. Total loss was 0.3003464 (video 0.2878386, action 0.0125078), with
-  gradient norm 0.2334837. This is a smoke result, not a throughput estimate for
-  full training. GPU peak memory was not recorded for this successful run.
-- The 8 MiB training cache downloaded 9,250,049 bytes, recorded 137 hits / 204
-  misses / 24 evictions, and ended at 8,384,739 payload bytes, below its 8,388,608
-  byte limit. DataLoader prefetch contributes to these totals.
-- Full video/action fine-tuning on two GPUs reached backward but failed in
-  AdamW's optimizer step (an additional 11.22 GiB allocation with 9.97 GiB free),
-  even with `optimizer_foreach=false`. CPU offload was also blocked by the
-  node's CUDA toolkit/PyTorch build mismatch. Neither full two-GPU training nor
-  larger-scale throughput is validated by this smoke run.
-
-Remote validation logs and JSON reports are under
-`/vePFS/tangyuting/OpenWAM-tos/outputs/tos_validation/`. Training checkpoints
-remain local/vePFS outputs; automatic checkpoint upload to TOS is not implemented.
-
-Reproduce the successful smoke test from the remote repo:
+安装 `pip install -e '.[tos]'`，准备转换完成的 portable 桶，并选择尚未发布的新版本前缀：
 
 ```bash
 cd /vePFS/tangyuting/OpenWAM-tos
-export TOS_CREDENTIAL_FILE=/root/.config/openwam/tos-linglong.json
-export LINGLONG_TOS_DATASET=tos://ml-platform-auto-created-required-2109640594-cn-beijing/linglong/openwam/linglong/20261022_smoke_v1
-export OPENWAM_TOS_CONFIG=train_linglong_tos_smoke
-NPROC_PER_NODE=2 scripts/train_linglong_tos.sh
+/vePFS/tangyuting/envs/openwam/bin/python scripts/run_with_tos_credentials.py \
+  /vePFS/tangyuting/.config/openwam/tos-linglong.json \
+  /vePFS/tangyuting/envs/openwam/bin/python -m scripts.publish_linglong_tos \
+  --source /path/to/converted_train_bucket \
+  --destination tos://ml-platform-auto-created-required-2109640594-cn-beijing/linglong/openwam/linglong/NEW_VERSION \
+  --workers 8
 ```
+
+发布器上传 parquet、引用的 JPEG、元数据及原训练统计，最后写入 `manifest.json`。失败且尚未写入 manifest 的前缀可重试；已有 manifest 的前缀禁止再次发布。发布后不要覆盖任何对象。test 桶使用独立前缀，训练统计始终来自 train；测试时显式配置 `dataloader.eval_dataset_dir`。
+
+当前 checkpoint 输出到 vePFS 的 `training.output_path`，不自动同步 TOS。读取数据无需先把整个 TOS 数据集下载到本地。

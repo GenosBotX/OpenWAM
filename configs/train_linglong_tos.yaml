@@ -1,4 +1,4 @@
-# Full Linglong EEF training. Override dataset URI after publishing all episodes.
+# Linglong EEF training from an immutable published TOS dataset.
 defaults:
   - train_linglong_0923_1010_1012_1017_fittings_eef_gtstate_8gpu
   - _self_
@@ -13,6 +13,8 @@ dataloader:
   window_stride: 1  # Match the local Linglong Base recipe.
 
 training:
+  batch_size: 6
+  gradient_accumulation_steps: 24
   output_path: outputs/linglong_tos
   save_full_states_for_resume: false
   keep_last_k_ckpts: 1

@@ -21,7 +21,7 @@ export TORCH_EXTENSIONS_DIR="${TORCH_EXTENSIONS_DIR:-/tmp/openwam-torch-extensio
 python_bin="${OPENWAM_PYTHON:-/vePFS/tangyuting/envs/openwam/bin/python}"
 config="${OPENWAM_TOS_CONFIG:-train_linglong_tos}"
 launch=("$python_bin" -m torch.distributed.run --standalone --nnodes=1
-  "--nproc_per_node=${NPROC_PER_NODE:-2}" --module scripts.train "--config-name=$config" "$@")
+  "--nproc_per_node=${NPROC_PER_NODE:-8}" --module scripts.train "--config-name=$config" "$@")
 if [[ -n "${TOS_CREDENTIAL_FILE:-}" ]]; then
   exec "$python_bin" scripts/run_with_tos_credentials.py "$TOS_CREDENTIAL_FILE" "${launch[@]}"
 fi

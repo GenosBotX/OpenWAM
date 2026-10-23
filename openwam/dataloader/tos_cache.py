@@ -17,6 +17,7 @@ from pathlib import Path, PurePosixPath
 import shutil
 import sqlite3
 import time
+import threading
 from urllib.parse import urlsplit
 
 
@@ -106,6 +107,8 @@ class BoundedTosCache:
         self.root.mkdir(parents=True, exist_ok=True)
         (self.root / "locks").mkdir(exist_ok=True)
         self.backend = backend or TosBackend()
+        self._db = None
+        self._db_owner = None
         # A single cross-process lock protects the index and quota reservations.
         with self._index() as db:
             db.execute("CREATE TABLE IF NOT EXISTS config (value TEXT)")
@@ -118,17 +121,55 @@ class BoundedTosCache:
             db.execute("CREATE TABLE IF NOT EXISTS entries (id TEXT PRIMARY KEY, size INTEGER, atime REAL, ready INTEGER)")
             db.execute("CREATE INDEX IF NOT EXISTS entries_lru ON entries(atime,id)")
             db.execute("CREATE TABLE IF NOT EXISTS counters (name TEXT PRIMARY KEY, value INTEGER)")
+            # Keep quota accounting in the same transaction as every entry change.
+            # Scanning all cached images on each miss serializes every worker.
+            db.execute("CREATE TABLE IF NOT EXISTS usage (id INTEGER PRIMARY KEY CHECK(id=1), total INTEGER NOT NULL, inflight INTEGER NOT NULL, objects INTEGER NOT NULL)")
+            if db.execute("SELECT 1 FROM usage WHERE id=1").fetchone() is None:
+                db.execute("INSERT INTO usage SELECT 1, COALESCE(SUM(size),0), COALESCE(SUM(CASE WHEN ready=0 THEN size ELSE 0 END),0), COUNT(*) FROM entries")
+            db.execute("""CREATE TRIGGER IF NOT EXISTS usage_insert AFTER INSERT ON entries BEGIN
+                UPDATE usage SET total=total+NEW.size,
+                    inflight=inflight+CASE WHEN NEW.ready=0 THEN NEW.size ELSE 0 END,
+                    objects=objects+1 WHERE id=1;
+                END""")
+            db.execute("""CREATE TRIGGER IF NOT EXISTS usage_delete AFTER DELETE ON entries BEGIN
+                UPDATE usage SET total=total-OLD.size,
+                    inflight=inflight-CASE WHEN OLD.ready=0 THEN OLD.size ELSE 0 END,
+                    objects=objects-1 WHERE id=1;
+                END""")
+            db.execute("""CREATE TRIGGER IF NOT EXISTS usage_update AFTER UPDATE OF size,ready ON entries BEGIN
+                UPDATE usage SET total=total+NEW.size-OLD.size,
+                    inflight=inflight+CASE WHEN NEW.ready=0 THEN NEW.size ELSE 0 END
+                        -CASE WHEN OLD.ready=0 THEN OLD.size ELSE 0 END WHERE id=1;
+                END""")
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state["_db"] = None
+        state["_db_owner"] = None
+        return state
 
     @contextlib.contextmanager
     def _index(self):
         with open(self.root / "index.lock", "a+b") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            db = sqlite3.connect(self.root / "index.sqlite3", timeout=60)
-            try:
-                with db:
-                    yield db
-            finally:
-                db.close()
+            owner = (os.getpid(), threading.get_ident())
+            if self._db_owner != owner:
+                # Never use a SQLite connection inherited from a parent worker.
+                if self._db is not None:
+                    self._db.close()
+                self._db = None
+                self._db_owner = None
+                db = sqlite3.connect(self.root / "index.sqlite3", timeout=60, check_same_thread=False)
+                try:
+                    db.execute("PRAGMA journal_mode=WAL")
+                    # Keep crash durability; no NORMAL/OFF durability shortcut.
+                    db.execute("PRAGMA synchronous=FULL")
+                except BaseException:
+                    db.close()
+                    raise
+                self._db, self._db_owner = db, owner
+            with self._db:
+                yield self._db
 
     @staticmethod
     def _count(db, name, amount=1):
@@ -137,7 +178,7 @@ class BoundedTosCache:
     def _reserve(self, db, identity, size):
         if size > self.max_bytes:
             raise CacheFullError(f"Object size {size} exceeds cache limit {self.max_bytes}")
-        used, inflight = db.execute("SELECT COALESCE(SUM(size),0), COALESCE(SUM(CASE WHEN ready=0 THEN size ELSE 0 END),0) FROM entries").fetchone()
+        used, inflight = db.execute("SELECT total,inflight FROM usage WHERE id=1").fetchone()
         def enough():
             # Remaining in-flight bytes also consume future physical space.
             return used + size <= self.max_bytes and shutil.disk_usage(self.root).free - inflight - size >= self.min_free_bytes
@@ -220,8 +261,9 @@ class BoundedTosCache:
     def stats(self):
         with self._index() as db:
             result = dict(db.execute("SELECT name,value FROM counters"))
-            result["reserved_bytes"] = db.execute("SELECT COALESCE(SUM(size),0) FROM entries").fetchone()[0]
-            result["objects"] = db.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
+            result["reserved_bytes"], result["inflight_bytes"], result["objects"] = db.execute(
+                "SELECT total,inflight,objects FROM usage WHERE id=1"
+            ).fetchone()
             result["max_bytes"] = self.max_bytes
             return result
 

@@ -18,14 +18,14 @@ output_path="${LINGLONG_TOS_OUTPUT_PATH:-/vePFS/tangyuting/OpenWAM/outputs/lingl
 launch=(bash scripts/train_linglong_tos.sh
   training.batch_size=6
   training.gradient_accumulation_steps=24
-  dataloader.window_stride=4
+  dataloader.window_stride=1
   training.num_epochs=5
   training.resume_ckpt_path=null
   "training.output_path=$output_path"
   "project.output_dir=$output_path/hydra"
   "$@")
 
-echo "Linglong TOS EEF: 1 node x 8 GPUs, batch 6/rank, accumulation 24, window stride 4"
+echo "Linglong TOS EEF: 1 node x 8 GPUs, batch 6/rank, accumulation 24, window stride 1"
 echo "Dataset: $LINGLONG_TOS_DATASET"
 echo "Output: $output_path"
 if [[ "${OPENWAM_LAUNCH_DRYRUN:-0}" == 1 ]]; then

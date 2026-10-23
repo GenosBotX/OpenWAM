@@ -1,5 +1,5 @@
 TaskName: "openwam-linglong-tos-0923-1017-eef-8gpu-bs6"
-Description: "Full 721-episode Linglong TOS EEF training; 8 GPUs x batch 6 x accumulation 24; window stride 4"
+Description: "Full 721-episode Linglong TOS EEF training; 8 GPUs x batch 6 x accumulation 24; window stride 1 (same as Base)"
 Tags:
   - "openwam"
   - "linglong"

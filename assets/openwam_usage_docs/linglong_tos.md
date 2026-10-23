@@ -41,7 +41,7 @@ Beijing region. `TOS_SECURITY_TOKEN` is supported for temporary credentials.
 
 The full recipe uses the 16D `observation.state_eef` / `action_eef` pair, the
 existing EEF normalization artifacts, 33 control frames, video stride 4, and
-window stride 4. The default cache is shared at `/tmp/openwam-tos-cache` on each
+window stride 1 (matching the local Linglong Base recipe). The default cache is shared at `/tmp/openwam-tos-cache` on each
 node. Override `OPENWAM_TOS_CACHE_DIR` and the cache quota in the config for the
 node's local disk budget.
 

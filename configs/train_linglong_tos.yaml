@@ -10,7 +10,7 @@ dataloader:
   cache_dir: ${oc.env:OPENWAM_TOS_CACHE_DIR,/tmp/openwam-tos-cache}
   cache_max_bytes: 4294967296  # 4 GiB per node, shared by all ranks/workers
   cache_min_free_bytes: 1073741824
-  window_stride: 4
+  window_stride: 1  # Match the local Linglong Base recipe.
 
 training:
   output_path: outputs/linglong_tos

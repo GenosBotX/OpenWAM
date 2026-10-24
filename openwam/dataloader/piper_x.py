@@ -1,6 +1,6 @@
 """Piper X absolute EEF reader.
 
-Buckets come from ``scripts_piper/convert_piper_x.py``. Each arm is stored in
+Buckets come from ``scripts/piper/convert_piper_x.py``. Each arm is stored in
 its own base as 16D ``left xyz + wxyz + gripper, right xyz + wxyz + gripper``.
 Gripper aperture is 0 closed and 1 open. Both arms are supervised.
 

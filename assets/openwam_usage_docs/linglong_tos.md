@@ -81,4 +81,4 @@ export OPENWAM_CHECKPOINT_CACHE=/shared/cache/openwam-checkpoints
 
 运行目录需要保留 `config.yaml`、`normalization_stats.npy`、tokenizer 资源和至少一个 `checkpoint_step_N.safetensors`。精简 checkpoint 支持 DDP、ZeRO-1 和 ZeRO-2；不支持 FSDP、ZeRO-3。
 
-Piper-X 的数据和训练入口见 [Piper-X TOS 说明](../../scripts_piper/README.md)。
+Piper-X 的数据和训练入口见 [Piper-X TOS 说明](../../scripts/piper/README.md)。

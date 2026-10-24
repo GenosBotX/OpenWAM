@@ -143,7 +143,7 @@ def test_child_exit_status_is_preserved(tmp_path):
 
 
 def test_launcher_defaults_to_shared_credentials():
-    launcher = ROOT / "scripts_piper/launch_volcano_piper_x_20261022_20261023_tos_eef_8gpu_e10.sh"
+    launcher = ROOT / "scripts/piper/launch_volcano_piper_x_20261022_20261023_tos_eef_8gpu_e10.sh"
     env = dict(os.environ, OPENWAM_LAUNCH_DRYRUN="1")
     for key in ("OPENWAM_TOS_CREDENTIALS", "TOS_CREDENTIAL_FILE"):
         env.pop(key, None)
@@ -158,7 +158,7 @@ def test_launcher_defaults_to_shared_credentials():
     ({"TOS_CREDENTIAL_FILE": "/shared/credentials.json", "OPENWAM_TOS_CREDENTIALS": "/job/credentials.json"}, "/job/credentials.json"),
 ])
 def test_launcher_credential_path_overrides(overrides, expected):
-    launcher = ROOT / "scripts_piper/launch_volcano_piper_x_20261022_20261023_tos_eef_8gpu_e10.sh"
+    launcher = ROOT / "scripts/piper/launch_volcano_piper_x_20261022_20261023_tos_eef_8gpu_e10.sh"
     env = dict(os.environ, OPENWAM_LAUNCH_DRYRUN="1")
     for key in ("OPENWAM_TOS_CREDENTIALS", "TOS_CREDENTIAL_FILE"):
         env.pop(key, None)

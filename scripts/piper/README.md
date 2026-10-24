@@ -26,7 +26,7 @@ tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/202
 
 ```bash
 cd /vePFS/tangyuting/OpenWAM-tos
-bash scripts_piper/launch_volcano_piper_x_20261022_20261023_tos_eef_8gpu_e10.sh
+bash scripts/piper/launch_volcano_piper_x_20261022_20261023_tos_eef_8gpu_e10.sh
 ```
 
 默认使用单节点 8 卡、每卡 batch 4、梯度累积 24、10 个 epoch、bf16 和 ZeRO-2，从 Piper-X 基础权重初始化。TOS 凭证通过 `OPENWAM_TOS_CREDENTIALS` 或 `TOS_CREDENTIAL_FILE` 指定；也可以由任务环境注入 TOS 凭证变量。凭证不写入仓库或启动参数。
@@ -52,7 +52,7 @@ training:
 续训时指定具体运行目录，并清空预训练入口：
 
 ```bash
-bash scripts_piper/launch_volcano_piper_x_20261022_20261023_tos_eef_8gpu_e10.sh \
+bash scripts/piper/launch_volcano_piper_x_20261022_20261023_tos_eef_8gpu_e10.sh \
   training.finetune_ckpt_path=null \
   training.resume_ckpt_path=/path/to/run
 ```

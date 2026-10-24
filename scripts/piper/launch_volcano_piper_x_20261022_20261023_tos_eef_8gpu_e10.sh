@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 python_bin="${OPENWAM_PYTHON:-/vePFS/tangyuting/envs/openwam/bin/python}"
 export OPENWAM_REPO_ROOT="$repo_root"
 export PYTHONPATH="$repo_root:${PYTHONPATH:-}"

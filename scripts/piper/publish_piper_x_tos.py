@@ -17,8 +17,8 @@ from PIL import Image
 
 from openwam.dataloader.tos_cache import TosBackend, parse_tos_uri
 from openwam.dataloader.utils.eef import quat_wxyz_to_rot6d
-from scripts_piper.convert_piper_x import build_episode, _fixed_list, _contracts, _sha256, _stats
-from scripts_piper.kinematics import PiperXKinematics
+from scripts.piper.convert_piper_x import build_episode, _fixed_list, _contracts, _sha256, _stats
+from scripts.piper.kinematics import PiperXKinematics
 
 PROMPT = 'Use the right hand to continuously place the objects on the table into the container on the table.'
 BASELINE = Path('/vePFS/data/piper-x_openwam/20261022_ax_only_full/piper_x_openwam_train_15hz')

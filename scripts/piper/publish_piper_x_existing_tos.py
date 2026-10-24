@@ -9,7 +9,7 @@ from pathlib import Path
 import pyarrow.parquet as pq
 from PIL import Image
 
-from scripts_piper.publish_piper_x_tos import Publisher, json_bytes, retry
+from scripts.piper.publish_piper_x_tos import Publisher, json_bytes, retry
 
 
 def publish(source, destination, normalization, workers):

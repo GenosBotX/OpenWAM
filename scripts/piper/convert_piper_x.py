@@ -28,9 +28,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 if __package__ in (None, ""):
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from scripts_piper.kinematics import PiperXKinematics, make_quaternion_continuous
+from scripts.piper.kinematics import PiperXKinematics, make_quaternion_continuous
 
 
 FPS = 15
@@ -244,7 +244,7 @@ def _contracts(fk: PiperXKinematics):
             "column": "action_eef",
             "source": "FK of recorded absolute joint commands through tcp_link",
             "kinematics_used": True,
-            "urdf": "scripts_piper/urdf/piper_x_kinematics.urdf",
+            "urdf": "scripts/piper/urdf/piper_x_kinematics.urdf",
         },
         "observation_state_eef": {
             **common,

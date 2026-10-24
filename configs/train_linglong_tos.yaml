@@ -16,7 +16,11 @@ training:
   batch_size: 6
   gradient_accumulation_steps: 24
   output_path: outputs/linglong_tos
-  save_full_states_for_resume: false
+  save_trainable_only: true
+  save_full_states_for_resume: true
+  checkpoint_base_path: /vePFS/tangyuting/OpenWAM/assets/openwam_ckpt/openwam_alpha/OpenWAM-Alpha-Pretrain-Foundation-Model/checkpoint_step_154000.safetensors
+  checkpoint_base_url: https://huggingface.co/OpenWAM/OpenWAM-Alpha-Pretrain-Foundation-Model/resolve/main/checkpoint_step_154000.safetensors
+  checkpoint_base_sha256: 8d7d3a1f1e5ce46d58d676c71315d3950007dad242676b43236bef6c4396c0b1
   keep_last_k_ckpts: 1
 
 project:

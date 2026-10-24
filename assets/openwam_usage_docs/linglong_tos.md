@@ -1,59 +1,84 @@
-# Linglong TOS 数据使用
+# Linglong TOS 训练与推理
 
-完整的数据语义、缓存行为、训练参数和 checkpoint 说明见 [Linglong EEF 数据读取与训练](linglong.md)。TOS 和本地训练共用 `LinglongDataset`，不改变 EEF 定义、归一化或采样方式。
+## 数据
 
-## 当前训练数据与入口
-
-完整训练前缀：
+当前 Linglong 训练数据前缀为：
 
 ```text
 tos://ml-platform-auto-created-required-2109640594-cn-beijing/linglong/openwam/linglong/20261022_0923_1017_eef_v1
 ```
 
-在配置好 1 worker × 8 GPU 和 vePFS 挂载的 Volcano 任务中执行：
+`LinglongDataset` 直接读取 TOS 对象，训练不需要先把数据集复制到 vePFS。数据字段、EEF16 约定、80 维统一映射、归一化、三路相机布局和窗口采样见 [Linglong 数据说明](linglong.md)。
 
-```bash
-cd /vePFS/tangyuting/OpenWAM-tos && \
-bash scripts/launch_volcano_linglong_tos_eef_8gpu_bs6.sh
-```
+TOS 对象按需缓存到节点本地目录 `${OPENWAM_TOS_CACHE_DIR:-/tmp/openwam-tos-cache}`。默认每节点缓存上限为 4 GiB，并保留 1 GiB 空闲空间；各 rank 和 DataLoader worker 共用该缓存。凭证通过任务环境变量或外部 JSON 文件提供，不写入仓库。
 
-每卡 bs6、accum24、窗口步长 1、视频步长 4、5 epochs。288×256 输入改用 `scripts/launch_volcano_linglong_tos_eef_8gpu_bs6_h288_w256.sh`。
+## 训练
 
-launcher 默认从 `/vePFS/tangyuting/.config/openwam/tos-linglong.json` 加载凭证；该文件需归任务用户所有、权限 0600。可用 `TOS_CREDENTIAL_FILE` 覆盖路径。文件包含 `TOS_ACCESS_KEY`、`TOS_SECRET_KEY`，以及可选的 `TOS_SECURITY_TOKEN`、`TOS_ENDPOINT`、`TOS_REGION`；不要将凭证写入仓库。
-
-使用任务注入的凭证环境变量时，可直接运行通用入口：
-
-```bash
-export LINGLONG_TOS_DATASET=tos://ml-platform-auto-created-required-2109640594-cn-beijing/linglong/openwam/linglong/20261022_0923_1017_eef_v1
-NPROC_PER_NODE=8 bash scripts/train_linglong_tos.sh
-```
-
-## 缓存配置
-
-对象按需下载到 `${OPENWAM_TOS_CACHE_DIR:-/tmp/openwam-tos-cache}`；同节点 rank/worker 共享 4 GiB 内容缓存，保留 1 GiB 空闲空间。缓存目录使用节点本地 Linux 磁盘，全部使用者须设置相同限额；修改限额请切换目录。
-
-DataLoader 每 rank 8 个 worker，默认每 worker 提前准备 2 个 batch。预取与模型计算重叠，缓存不足时以 LRU 淘汰；没有全量本地副本或独立全量预取服务。磁盘限额不包含解码后图像、prefetch 队列和 parquet 的主机内存。
-
-```bash
-OPENWAM_TOS_CACHE_DIR=/tmp/openwam-tos-cache-8g \
-bash scripts/launch_volcano_linglong_tos_eef_8gpu_bs6.sh \
-  dataloader.cache_max_bytes=8589934592
-```
-
-## 发布数据
-
-安装 `pip install -e '.[tos]'`，准备转换完成的 portable 桶，并选择尚未发布的新版本前缀：
+使用 `configs/train_linglong_tos.yaml` 和以下入口：
 
 ```bash
 cd /vePFS/tangyuting/OpenWAM-tos
-/vePFS/tangyuting/envs/openwam/bin/python scripts/run_with_tos_credentials.py \
-  /vePFS/tangyuting/.config/openwam/tos-linglong.json \
-  /vePFS/tangyuting/envs/openwam/bin/python -m scripts.publish_linglong_tos \
-  --source /path/to/converted_train_bucket \
-  --destination tos://ml-platform-auto-created-required-2109640594-cn-beijing/linglong/openwam/linglong/NEW_VERSION \
-  --workers 8
+bash scripts/launch_volcano_linglong_tos_eef_8gpu_bs6.sh
 ```
 
-发布器上传 parquet、引用的 JPEG、元数据及原训练统计，最后写入 `manifest.json`。失败且尚未写入 manifest 的前缀可重试；已有 manifest 的前缀禁止再次发布。发布后不要覆盖任何对象。test 桶使用独立前缀，训练统计始终来自 train；测试时显式配置 `dataloader.eval_dataset_dir`。
+当前默认参数为单节点 8 卡、每卡 batch 6、梯度累积 24、窗口步长 1、视频步长 4、5 个 epoch、bf16 和 ZeRO-2。训练数据、图像和统计量均从 TOS 读取，模型 checkpoint 保存到 `training.output_path` 指定的 vePFS 目录。
 
-当前 checkpoint 输出到 vePFS 的 `training.output_path`，不自动同步 TOS。读取数据无需先把整个 TOS 数据集下载到本地。
+启动脚本默认使用 `/vePFS/tangyuting/.config/openwam/tos-linglong.json`。也可以在任务环境中设置：
+
+```bash
+export LINGLONG_TOS_DATASET=tos://ml-platform-auto-created-required-2109640594-cn-beijing/linglong/openwam/linglong/20261022_0923_1017_eef_v1
+export TOS_CREDENTIAL_FILE=/path/to/tos-credentials.json
+bash scripts/train_linglong_tos.sh
+```
+
+## 精简 checkpoint
+
+Linglong 和 Piper-X 使用同一套 checkpoint 实现。当前 Linglong TOS 配置开启：
+
+```yaml
+training:
+  save_trainable_only: true
+  save_full_states_for_resume: true
+```
+
+每个 `checkpoint_step_N.safetensors` 保存当前实际参与训练的参数和持久 buffer，冻结的基础参数不重复保存。清单内记录基础权重的 SHA-256 和公共地址；训练开始时会校验当前模型的冻结参数与基础权重一致。
+
+同一步的 `accel_state_step_N/` 保存优化器、调度器、混合精度、随机数和数据读取状态，用于继续训练。只有权重与该目录配对完整时，保存点才会被续训逻辑选中。
+
+## 续训
+
+续训时指向具体的运行目录，并清空预训练入口：
+
+```bash
+bash scripts/launch_volcano_linglong_tos_eef_8gpu_bs6.sh \
+  training.finetune_ckpt_path=null \
+  training.resume_ckpt_path=/path/to/run
+```
+
+续训应保持数据、归一化统计、batch、梯度累积、进程数和随机种子一致。
+
+## 推理与 WebSocket
+
+`scripts/deploy.py` 和 WebSocket 服务共用同一个 checkpoint 加载入口。加载精简 checkpoint 时，程序读取运行目录中的 `config.yaml`、归一化统计和训练权重，从本机基础权重、共享缓存或清单记录的 HTTPS 地址取得冻结参数，并按 SHA-256 校验后合并。client 协议不需要改变。
+
+启动服务：
+
+```bash
+cd /vePFS/tangyuting/OpenWAM-tos
+bash scripts/deploy.sh \
+  --ckpt-dir /path/to/run \
+  --device cuda:0 \
+  --host 0.0.0.0 \
+  --port 8848
+```
+
+异地部署时可以显式指定完整基础权重和缓存目录：
+
+```bash
+export OPENWAM_BASE_CHECKPOINT=/shared/models/checkpoint.safetensors
+export OPENWAM_CHECKPOINT_CACHE=/shared/cache/openwam-checkpoints
+```
+
+运行目录需要保留 `config.yaml`、`normalization_stats.npy`、tokenizer 资源和至少一个 `checkpoint_step_N.safetensors`。精简 checkpoint 支持 DDP、ZeRO-1 和 ZeRO-2；不支持 FSDP、ZeRO-3。
+
+Piper-X 的数据和训练入口见 [Piper-X TOS 说明](../../scripts_piper/README.md)。

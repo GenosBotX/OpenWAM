@@ -1,0 +1,92 @@
+# 两日 Piper-X 数据，EEF20 rot6d，训练帧统计；batch 与预训练源沿用 20261022 配置。
+defaults:
+- train_linglong_0923_1010
+- _self_
+dataloader:
+  type: piper_x
+  dataset_dir:
+  - tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261022_eef_v1/train
+  - tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261023_eef_v1/train
+  eval_dataset_dir:
+  - tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261022_eef_v1/test
+  - tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261023_eef_v1/test
+  normalization_dataset_dir: tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261023_eef_v1/normalization
+  action_mode: eef
+  unify_action: true
+  unify_action_map:
+  - 0-9
+  - 34-43
+  unify_state_map:
+  - 0-9
+  - 34-43
+  active_raw_action_dims:
+  - 0
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  - 8
+  - 9
+  - 10
+  - 11
+  - 12
+  - 13
+  - 14
+  - 15
+  - 16
+  - 17
+  - 18
+  - 19
+  active_raw_state_dims:
+  - 0
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  - 8
+  - 9
+  - 10
+  - 11
+  - 12
+  - 13
+  - 14
+  - 15
+  - 16
+  - 17
+  - 18
+  - 19
+  num_frames: 33
+  video_stride: 4
+  window_stride: 1
+  height: 384
+  width: 320
+  multiview: true
+  camera_layout:
+  - head
+  - left
+  - right
+  normalize_mode: min-max
+  cache_dir: /tmp/openwam-piper-tos-cache
+  cache_max_bytes: 4294967296
+  cache_min_free_bytes: 1073741824
+training:
+  batch_size: 4
+  gradient_accumulation_steps: 24
+  num_epochs: 10
+  save_steps: 2000
+  save_trainable_only: true
+  save_full_states_for_resume: true
+  checkpoint_base_path: /vePFS/data/openwam/OpenWAM-Alpha-Real-RoboDojo-Piper-X/checkpoint_step_30000.safetensors
+  checkpoint_base_url: https://huggingface.co/OpenWAM/OpenWAM-Alpha-Real-RoboDojo-Piper-X/resolve/main/checkpoint_step_30000.safetensors
+  checkpoint_base_sha256: fa5c1705ad553a3e042906213941acdc3ed958f81b7a2c7cfbc063fc61c80b4e
+  resume_ckpt_path: null
+  finetune_ckpt_path: /vePFS/data/openwam/OpenWAM-Alpha-Real-RoboDojo-Piper-X/checkpoint_step_30000.safetensors
+  output_path: /vePFS/tangyuting/OpenWAM-tos/outputs/train_piper_x_20261022_20261023_tos_eef_8gpu_e10
+project:
+  output_dir: /vePFS/tangyuting/OpenWAM-tos/outputs/train_piper_x_20261022_20261023_tos_eef_8gpu_e10/hydra

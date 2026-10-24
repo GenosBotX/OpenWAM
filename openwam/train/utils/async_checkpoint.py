@@ -29,6 +29,8 @@ from openwam.train.utils.checkpointing import (
     write_weights_atomic,
 )
 
+from openwam.train.utils.compact_resume import resume_descriptor, save_accelerator_state
+
 logger = logging.getLogger(__name__)
 
 # One full state is ~103 GiB plus the rank-0 weights clone and the buffer
@@ -127,12 +129,14 @@ class CheckpointPublisher:
         staging_root: str | None = None,
         min_free_bytes: int | None = None,
         copy_gate: threading.Event | None = None,
+        overlay_config: dict | None = None,
     ):
         self.accelerator = accelerator
         self.enabled = bool(enabled)
         self._configured_root = staging_root or None
         self._min_free_bytes = _DEFAULT_MIN_FREE_BYTES if min_free_bytes is None else int(min_free_bytes)
         self._copy_gate = copy_gate
+        self.overlay_config = overlay_config
         self._thread: threading.Thread | None = None
         self._inflight_step: int | None = None
         self._inflight_output: str | None = None
@@ -163,6 +167,11 @@ class CheckpointPublisher:
     ) -> None:
         """Stage this step and return. The previous copy is finished first."""
         self.wait()
+        if self._is_main:
+            marker = os.path.join(output_path, f"accel_state_step_{global_step}", "trainer_state.json")
+            if os.path.exists(marker):
+                os.remove(marker)
+        self.accelerator.wait_for_everyone()
         use_async, staging_root, reason = self._async_decision(include_full_state)
         if not self._announced and self._is_main:
             self._announced = True
@@ -200,7 +209,9 @@ class CheckpointPublisher:
             if self._is_main:
                 os.makedirs(os.path.dirname(staging_dir), exist_ok=True)
             self.accelerator.wait_for_everyone()
-            self.accelerator.save_state(staging_dir)
+            save_accelerator_state(
+                self.accelerator, staging_dir, trainable_only=self.overlay_config is not None,
+            )
             self.accelerator.wait_for_everyone()
         else:
             staging_dir = None
@@ -208,8 +219,14 @@ class CheckpointPublisher:
         snapshot_error = None
         if self._is_main:
             try:
-                state_dict = self.accelerator.get_state_dict(architecture)
-                architecture = self.accelerator.unwrap_model(architecture)
+                unwrapped = self.accelerator.unwrap_model(architecture)
+                if self.overlay_config is not None:
+                    from openwam.train.utils.trainable_checkpoint import snapshot_trainable
+
+                    state_dict = snapshot_trainable(unwrapped, self.overlay_config)
+                else:
+                    state_dict = self.accelerator.get_state_dict(architecture)
+                architecture = unwrapped
             except Exception:
                 snapshot_error = traceback.format_exc()
                 _write_text_atomic(_failure_path(output_path, global_step), snapshot_error)
@@ -322,10 +339,14 @@ class CheckpointPublisher:
         self, architecture, output_path, global_step, opt_step, epoch, *,
         resume_context, final, include_full_state, prune, keep_last_k,
     ) -> None:
-        save_weights(self.accelerator, architecture, output_path, global_step, final=final)
+        save_weights(
+            self.accelerator, architecture, output_path, global_step, final=final,
+            trainable_only=self.overlay_config is not None, overlay_config=self.overlay_config,
+        )
         if include_full_state:
             save_full_state(
                 self.accelerator, output_path, global_step, opt_step, epoch, resume_context=resume_context,
+                overlay_config=self.overlay_config,
             )
         else:
             self.accelerator.wait_for_everyone()
@@ -349,7 +370,10 @@ class CheckpointPublisher:
                         os.remove(marker)
                 _copy_tree(staging_dir, state_dir)
             if state_dict is not None:
-                path = write_weights_atomic(architecture, output_path, global_step, state_dict)
+                path = write_weights_atomic(
+                    architecture, output_path, global_step, state_dict,
+                    trainable_only=self.overlay_config is not None, overlay_config=self.overlay_config,
+                )
                 state_dict = None
                 _announce(
                     f"[checkpoint] {'final ' if final else ''}weights copied: {path}"
@@ -362,6 +386,7 @@ class CheckpointPublisher:
                     write_trainer_state(
                         state_dir, global_step=global_step, opt_step=opt_step, epoch=epoch,
                         resume_context=resume_context,
+                        model_checkpoint=resume_descriptor(global_step, self.overlay_config),
                     )
                     status_dir = os.path.join(output_path, ".ckpt_copy_status", f"step_{global_step}")
                     shutil.rmtree(status_dir, ignore_errors=True)

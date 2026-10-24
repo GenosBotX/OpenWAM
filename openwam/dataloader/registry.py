@@ -79,6 +79,7 @@ def _register_builtins():
     from openwam.dataloader.interndata_a1 import InternDataA1Dataset
     from openwam.dataloader.libero import LiberoDataset
     from openwam.dataloader.linglong import LinglongDataset
+    from openwam.dataloader.piper_x import PiperXDataset
     from openwam.dataloader.mixture import MixtureDataset
     from openwam.dataloader.muka_franka import MukaFrankaDataset
     from openwam.dataloader.oxe_droid import OxeDroidDataset
@@ -98,6 +99,7 @@ def _register_builtins():
     register_dataset("ebench")(EBenchDataset)
     register_dataset("libero")(LiberoDataset)
     register_dataset("linglong")(LinglongDataset)
+    register_dataset("piper_x")(PiperXDataset)
     register_dataset("muka_franka")(MukaFrankaDataset)
     register_dataset("oxe_droid")(OxeDroidDataset)
     register_dataset("robocasa365")(MultiTaskRoboCasa365Dataset)

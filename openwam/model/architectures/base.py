@@ -1492,6 +1492,10 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 raise ValueError("use_proprioception=True requires `proprio` during generation.")
             inputs_shared["proprio"] = proprio.to(device=device, dtype=dtype)
 
+        request_prepare = getattr(self, "prepare_inference_request_context", None)
+        if callable(request_prepare):
+            inputs_shared = request_prepare(inputs_shared, proprio=proprio, cfg_scale=cfg_scale_f)
+
         action_latents = torch.randn(
             1,
             action_num_frames - 1,

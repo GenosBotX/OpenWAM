@@ -10,6 +10,7 @@ Covers:
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Tuple
 
 import pytest
@@ -17,6 +18,7 @@ import torch
 
 from openwam.model.action_backbone.separate_action_dit import ActionDiT
 from openwam.model.architectures.base import ActionState
+from openwam.model.architectures.dual_system.joint_self_attn import DualSystemSelfAttnArchitecture
 from openwam.model.architectures.dual_system.mot_driver import DualSystemMoTDriver
 from openwam.model.architectures.utils.mask_modes import (
     ACTION_SEES_VIDEO,
@@ -25,6 +27,8 @@ from openwam.model.architectures.utils.mask_modes import (
     VIDEO_SEES_ACTION,
 )
 from openwam.model.video_backbone.base import BlockLoopState
+from openwam.model.video_backbone.wan.models.dit import CrossAttention as WanCrossAttention, WanModel
+from openwam.model.video_backbone.wan_backbone import Wan22Ti2v
 from tests.test_openwam_trainer import _MockVideoBackbone
 
 # ---------------------------------------------------------------------------
@@ -570,3 +574,165 @@ def test_driver_step_checkpoint_no_op_in_eval_mode():
 
     assert torch.allclose(vstate1.hidden_states, vstate2.hidden_states, atol=1e-6)
     assert torch.allclose(astate1.payload.x_action, astate2.payload.x_action, atol=1e-6)
+
+
+def test_wan_cross_attention_precomputed_context_kv_matches_eager():
+    torch.manual_seed(7)
+    module = WanCrossAttention(dim=16, num_heads=4).eval()
+    query = torch.randn(2, 5, 16)
+    context = torch.randn(2, 6, 16)
+    mask = torch.tensor(
+        [[True, True, True, False, False, False], [True, True, True, True, True, False]],
+        dtype=torch.bool,
+    ).unsqueeze(1).unsqueeze(1).expand(-1, 1, query.shape[1], -1)
+    with torch.no_grad():
+        expected = module(query, context, ctx_mask=mask)
+        context_kv = module.prepare_context_kv(context)
+        actual = module(query, context, ctx_mask=mask, context_kv=context_kv)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def test_action_request_context_kv_matches_joint_mot_forward():
+    torch.manual_seed(11)
+    vb = _MockVideoBackbone(dim=32, num_layers=2, num_heads=4)
+    ab = _make_action_dit(dim=32, num_heads=4, num_layers=2)
+    ab.eval()
+    driver = DualSystemMoTDriver(vb, ab, mot_checkpoint_mixed_attn=False)
+
+    batch, s_video, s_action = 2, 8, 5
+    raw_context, context_mask = _make_action_context(ab, batch, T_ctx=6)
+    context_emb, context_mask_cached, context_kv = ab.prepare_joint_self_attn_request_context(
+        raw_context, context_mask
+    )
+    actions = torch.randn(batch, s_action, ab.action_dim)
+    timestep = torch.randn(batch)
+    cached_state = ab.prepare_state(
+        actions,
+        timestep,
+        context=context_emb,
+        context_mask=context_mask_cached,
+        context_is_embedded=True,
+        context_kv=context_kv,
+    )
+    eager_state = ab.prepare_state(
+        actions,
+        timestep,
+        context=raw_context,
+        context_mask=context_mask,
+    )
+    video = torch.randn(batch, s_video, vb.dim)
+
+    def make_video_state():
+        return BlockLoopState(
+            hidden_states=video.clone(),
+            time_mod=torch.randn(batch, 6, vb.dim),
+            rope_freqs=torch.zeros(s_video, 1, 1),
+            context=torch.zeros(batch, 1, vb.dim),
+            grid_frames=s_video,
+            grid_height=1,
+            grid_width=1,
+        )
+
+    # Use identical timestep modulation and initial video state on both paths.
+    eager_state.payload.t_mod = cached_state.payload.t_mod.clone()
+    vstate_cached = make_video_state()
+    vstate_eager = BlockLoopState(
+        hidden_states=vstate_cached.hidden_states.clone(),
+        time_mod=vstate_cached.time_mod.clone(),
+        rope_freqs=vstate_cached.rope_freqs,
+        context=vstate_cached.context,
+        grid_frames=s_video,
+        grid_height=1,
+        grid_width=1,
+    )
+    with torch.no_grad():
+        _, cached_result = driver.run_joint_loop(vstate_cached, cached_state)
+        _, eager_result = driver.run_joint_loop(vstate_eager, eager_state)
+        cached_prediction = ab.extract_prediction(cached_result)
+        eager_prediction = ab.extract_prediction(eager_result)
+    torch.testing.assert_close(cached_prediction, eager_prediction, rtol=0, atol=0)
+
+
+def test_request_context_preparation_is_once_per_request_and_refreshes():
+    torch.manual_seed(19)
+    dit = WanModel(
+        dim=32,
+        in_dim=16,
+        ffn_dim=64,
+        out_dim=16,
+        text_dim=8,
+        freq_dim=16,
+        eps=1e-6,
+        patch_size=(1, 2, 2),
+        num_heads=4,
+        num_layers=2,
+        has_image_input=False,
+        require_vae_embedding=False,
+        require_clip_embedding=False,
+    )
+    vb = Wan22Ti2v(SimpleNamespace(dit=dit, scheduler=None, tokenizer=None))
+    ab = ActionDiT(
+        action_dim=7,
+        dim=32,
+        ffn_dim=64,
+        num_heads=4,
+        num_layers=2,
+        video_dim=32,
+        bridge_layers=(0, 1),
+        variant="joint_self_attn",
+        text_dim=8,
+    )
+    arch = DualSystemSelfAttnArchitecture(None)
+    arch.video_backbone = vb
+    arch.action_backbone = ab
+    arch.eval()
+
+    calls = {"video_text": 0, "action_text": 0, "video_kv": 0, "action_kv": 0}
+
+    def count(name):
+        def hook(_module, _inputs, _output):
+            calls[name] += 1
+
+        return hook
+
+    dit.text_embedding.register_forward_hook(count("video_text"))
+    ab.text_embedding.register_forward_hook(count("action_text"))
+    for block in dit.blocks:
+        block.cross_attn.k.register_forward_hook(count("video_kv"))
+        block.cross_attn.v.register_forward_hook(count("video_kv"))
+    for block in ab.blocks:
+        block.cross_attn.k.register_forward_hook(count("action_kv"))
+        block.cross_attn.v.register_forward_hook(count("action_kv"))
+
+    context = torch.randn(1, 6, 8)
+    mask = torch.tensor([[True, True, True, True, False, False]])
+    with torch.no_grad():
+        first = arch.prepare_inference_request_context(
+            {"context": context, "context_mask": mask},
+            cfg_scale=1.0,
+        )
+        assert first["_request_context_prepared"] is True
+        assert first["context"].shape == (1, 6, 32)
+        assert first["_request_action_context"].shape == (1, 6, 32)
+        assert len(first["context_kv"]) == len(dit.blocks)
+        assert len(first["_request_action_context_kv"]) == len(ab.blocks)
+        assert calls == {"video_text": 1, "action_text": 1, "video_kv": 4, "action_kv": 4}
+
+        next_context = context + 0.25
+        second = arch.prepare_inference_request_context(
+            {"context": next_context, "context_mask": mask},
+            cfg_scale=1.0,
+        )
+        assert calls == {"video_text": 2, "action_text": 2, "video_kv": 8, "action_kv": 8}
+        assert not torch.equal(first["context"], second["context"])
+
+        cfg = arch.prepare_inference_request_context(
+            {"context": context, "context_mask": mask},
+            cfg_scale=2.0,
+        )
+        assert "_request_context_prepared" not in cfg
+        assert calls == {"video_text": 2, "action_text": 2, "video_kv": 8, "action_kv": 8}
+        arch.train()
+        training = arch.prepare_inference_request_context({"context": context, "context_mask": mask})
+        assert "_request_context_prepared" not in training
+        assert calls == {"video_text": 2, "action_text": 2, "video_kv": 8, "action_kv": 8}

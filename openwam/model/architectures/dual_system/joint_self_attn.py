@@ -49,6 +49,7 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
         self._mot_driver: DualSystemMoTDriver | None = None
         self._mot_driver_kwargs: dict = {}
         self._compiled_mot_run_joint_loop: Optional[Callable[..., Tuple[object, object]]] = None
+        self._compiled_request_context_kv = None
         if cfg is None:
             return
         if self.video_backbone is not None:
@@ -136,6 +137,7 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
 
         super().apply_compile_optimizations(compile_cfg)
         self._compiled_mot_run_joint_loop = None
+        self._compiled_request_context_kv = None
         if not compile_enabled(compile_cfg, default=False, strict=True):
             return
 
@@ -160,11 +162,88 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
         kwargs = torch_compile_kwargs(section, default_mode="reduce-overhead")
         try:
             self._compiled_mot_run_joint_loop = torch.compile(_run_joint_loop, **kwargs)
+            self._compiled_request_context_kv = torch.compile(self._prepare_request_context_kv, **kwargs)
         except Exception as exc:  # pragma: no cover - defensive setup fallback
             self._compiled_mot_run_joint_loop = None
+            self._compiled_request_context_kv = None
             logger.warning("dual self-attn MoT torch.compile setup failed; running eager: %s", exc)
             return
         logger.info("Enabled dual self-attn MoT compile with torch.compile kwargs=%s", kwargs)
+
+    def _prepare_request_context_kv(self, video_context, action_context):
+        # Keep RMSNorm in the same compiler execution mode as the MoT loop.
+        # Computing it eagerly changes bf16 rounding relative to compiled MoT.
+        return (
+            tuple(block.cross_attn.prepare_context_kv(video_context) for block in self.video_backbone.dit.blocks),
+            tuple(block.cross_attn.prepare_context_kv(action_context) for block in self.action_backbone.blocks),
+        )
+
+    def prepare_inference_request_context(self, inputs_shared: dict, *, proprio=None, cfg_scale: float = 1.0) -> dict:
+        """Prepare fixed Wan/action text context and cross-attention K/V once per inference request."""
+        inputs_shared = dict(inputs_shared)
+        if self._compiled_mot_run_joint_loop is not None and self._compiled_request_context_kv is None:
+            return inputs_shared
+        # CFG has distinct conditional and unconditional contexts. Keep its
+        # existing per-forward path until both branches have independent caches.
+        if self.training or cfg_scale != 1.0 or inputs_shared.get("clip_feature") is not None:
+            return inputs_shared
+        vb = self.video_backbone
+        ab = self.action_backbone
+        # This cache is deliberately scoped to Wan's text cross-attention
+        # contract; other video backbones may use a different context layout.
+        from openwam.model.video_backbone.wan_backbone import WanBase
+
+        dit = getattr(vb, "dit", None)
+        if (
+            not isinstance(vb, WanBase)
+            or dit is None
+            or not hasattr(dit, "text_embedding")
+            or not hasattr(ab, "prepare_joint_self_attn_request_context")
+            or ab.variant != "joint_self_attn"
+        ):
+            return inputs_shared
+        if any(
+            getattr(block.cross_attn, "has_image_input", False)
+            or not hasattr(block.cross_attn, "prepare_context_kv")
+            for block in dit.blocks
+        ):
+            return inputs_shared
+
+        pipeline_inputs = self._append_proprio_context_token(inputs_shared, proprio)
+        raw_context = pipeline_inputs["context"]
+        context_mask = pipeline_inputs.get("context_mask")
+        if context_mask is None and pipeline_inputs.get("seq_lens") is not None:
+            seq_lens = pipeline_inputs["seq_lens"].to(device=raw_context.device)
+            positions = torch.arange(raw_context.shape[1], device=raw_context.device)
+            context_mask = positions.unsqueeze(0) < seq_lens.unsqueeze(1)
+        if context_mask is not None:
+            context_mask = context_mask.to(device=raw_context.device, dtype=torch.bool)
+
+        video_weight = dit.text_embedding[0].weight
+        video_context = dit.text_embedding(raw_context.to(device=video_weight.device, dtype=video_weight.dtype))
+        action_context, action_context_mask, _ = ab.prepare_joint_self_attn_request_context(
+            raw_context, context_mask, prepare_kv=False
+        )
+        prepare_kv = self._compiled_request_context_kv or self._prepare_request_context_kv
+        try:
+            video_context_kv, action_context_kv = prepare_kv(video_context, action_context)
+        except Exception:
+            if self._compiled_request_context_kv is None:
+                raise
+            # Preserve the original compiled numerical path if preparation
+            # cannot be compiled; never silently substitute eager K/V.
+            logger.exception("Compiled request K/V preparation failed; using per-step context projection.")
+            self._compiled_request_context_kv = None
+            return inputs_shared
+        pipeline_inputs["context"] = video_context
+        pipeline_inputs["context_mask"] = context_mask
+        pipeline_inputs["context_is_embedded"] = True
+        pipeline_inputs["context_kv"] = video_context_kv
+        pipeline_inputs["_request_context_prepared"] = True
+        pipeline_inputs["_request_action_context"] = action_context
+        pipeline_inputs["_request_action_context_mask"] = action_context_mask
+        pipeline_inputs["_request_action_context_kv"] = action_context_kv
+        return pipeline_inputs
 
     def forward(
         self,
@@ -184,9 +263,17 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
                 "architecture.__init__ to enable forward()."
             )
 
-        pipeline_inputs = self._append_proprio_context_token(dict(pipeline_inputs), proprio)
-        action_context = pipeline_inputs.get("context")
-        action_context_mask = pipeline_inputs.get("context_mask")
+        pipeline_inputs = dict(pipeline_inputs)
+        request_context_prepared = bool(pipeline_inputs.pop("_request_context_prepared", False))
+        request_action_context = pipeline_inputs.pop("_request_action_context", None)
+        request_action_context_mask = pipeline_inputs.pop("_request_action_context_mask", None)
+        request_action_context_kv = pipeline_inputs.pop("_request_action_context_kv", None)
+        if not request_context_prepared:
+            pipeline_inputs = self._append_proprio_context_token(pipeline_inputs, proprio)
+        action_context = request_action_context if request_context_prepared else pipeline_inputs.get("context")
+        action_context_mask = (
+            request_action_context_mask if request_context_prepared else pipeline_inputs.get("context_mask")
+        )
         if action_context is not None and action_context_mask is None and pipeline_inputs.get("seq_lens") is not None:
             seq_lens = pipeline_inputs["seq_lens"].to(device=action_context.device)
             positions = torch.arange(action_context.shape[1], device=action_context.device)
@@ -222,6 +309,8 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
             action_timestep,
             context=action_context,
             context_mask=action_context_mask,
+            context_is_embedded=request_context_prepared,
+            context_kv=request_action_context_kv,
             use_gradient_checkpointing=use_gradient_checkpointing,
             use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
         )

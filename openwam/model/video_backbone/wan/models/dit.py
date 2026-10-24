@@ -194,7 +194,21 @@ class CrossAttention(nn.Module):
 
         self.attn = AttentionModule(self.num_heads)
 
-    def forward(self, x: torch.Tensor, y: torch.Tensor, ctx_mask: Optional[torch.Tensor] = None):
+    def prepare_context_kv(self, y: torch.Tensor):
+        """Project context K/V once so inference requests can reuse them."""
+        if self.has_image_input:
+            img = y[:, :257]
+            ctx = y[:, 257:]
+            return self.norm_k(self.k(ctx)), self.v(ctx), self.norm_k_img(self.k_img(img)), self.v_img(img)
+        return self.norm_k(self.k(y)), self.v(y)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        ctx_mask: Optional[torch.Tensor] = None,
+        context_kv=None,
+    ):
         if self.has_image_input:
             img = y[:, :257]
             ctx = y[:, 257:]
@@ -203,12 +217,18 @@ class CrossAttention(nn.Module):
         else:
             ctx = y
         q = self.norm_q(self.q(x))
-        k = self.norm_k(self.k(ctx))
-        v = self.v(ctx)
+        if context_kv is None:
+            k = self.norm_k(self.k(ctx))
+            v = self.v(ctx)
+        else:
+            k, v = context_kv[:2]
         x = self.attn(q, k, v, attn_mask=ctx_mask)
         if self.has_image_input:
-            k_img = self.norm_k_img(self.k_img(img))
-            v_img = self.v_img(img)
+            if context_kv is None:
+                k_img = self.norm_k_img(self.k_img(img))
+                v_img = self.v_img(img)
+            else:
+                k_img, v_img = context_kv[2:]
             y = flash_attention(q, k_img, v_img, num_heads=self.num_heads)
             x = x + y
         return self.o(x)

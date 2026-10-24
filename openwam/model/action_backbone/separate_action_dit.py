@@ -72,6 +72,7 @@ class ActionDiTState:
     action_freqs: torch.Tensor  # 1D RoPE frequencies for action positions
     context: Optional[torch.Tensor] = None  # (B, T_context, dim), action-projected raw text/proprio context
     context_mask: Optional[torch.Tensor] = None  # (B, T_context) or (B, T_action, T_context), True means attendable
+    context_kv: Optional[tuple] = None  # Per-layer context K/V prepared once for inference requests.
 
 
 class ActionSelfAttention(nn.Module):
@@ -159,10 +160,22 @@ class BridgeCrossAttention(nn.Module):
         self.norm_q = RMSNorm(self.attn_hidden_dim, eps=eps)
         self.norm_k = RMSNorm(self.attn_hidden_dim, eps=eps)
 
-    def forward(self, x_action: torch.Tensor, x_video: torch.Tensor, ctx_mask: Optional[torch.Tensor] = None):
+    def prepare_context_kv(self, context: torch.Tensor):
+        """Project and normalize a context sequence for request-level reuse."""
+        return self.norm_k(self.k(context)), self.v(context)
+
+    def forward(
+        self,
+        x_action: torch.Tensor,
+        x_video: torch.Tensor,
+        ctx_mask: Optional[torch.Tensor] = None,
+        context_kv=None,
+    ):
         q = self.norm_q(self.q(x_action))
-        k = self.norm_k(self.k(x_video))
-        v = self.v(x_video)
+        if context_kv is None:
+            k, v = self.prepare_context_kv(x_video)
+        else:
+            k, v = context_kv
 
         q = rearrange(q, "b s (n d) -> b n s d", n=self.num_heads)
         k = rearrange(k, "b s (n d) -> b n s d", n=self.num_heads)
@@ -538,6 +551,7 @@ class ActionDiT(ActionDiTBackbone):
         seq_len: int,
         dtype: torch.dtype,
         device: torch.device,
+        context_is_embedded: bool = False,
     ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         if context is None:
             if context_mask is not None:
@@ -547,11 +561,13 @@ class ActionDiT(ActionDiTBackbone):
             raise ValueError(f"context must have shape [B, L, text_dim], got {tuple(context.shape)}")
         if context.shape[0] != batch_size:
             raise ValueError(f"context batch size ({context.shape[0]}) must match actions batch size ({batch_size})")
-        if context.shape[-1] != self.text_dim:
-            raise ValueError(f"context last dim must match text_dim={self.text_dim}, got {context.shape[-1]}")
+        expected_context_dim = self.dim if context_is_embedded else self.text_dim
+        if context.shape[-1] != expected_context_dim:
+            name = "action hidden dim" if context_is_embedded else "text_dim"
+            raise ValueError(f"context last dim must match {name}={expected_context_dim}, got {context.shape[-1]}")
 
         context = context.to(device=device, dtype=dtype)
-        context_emb = self.text_embedding(context)
+        context_emb = context if context_is_embedded else self.text_embedding(context)
         if context_mask is None:
             context_mask = torch.ones(context.shape[:2], dtype=torch.bool, device=device)
         else:
@@ -710,6 +726,35 @@ class ActionDiT(ActionDiTBackbone):
     # joint_self_attn / idm variants: MoT-driven entry points
     # ------------------------------------------------------------------
 
+    def prepare_joint_self_attn_request_context(
+        self,
+        context: torch.Tensor,
+        context_mask: Optional[torch.Tensor] = None,
+        *,
+        prepare_kv: bool = True,
+    ) -> tuple[torch.Tensor, torch.Tensor, Optional[tuple]]:
+        """Embed text/proprio and prepare per-layer cross-attention K/V once per request."""
+        if self.variant != "joint_self_attn":
+            raise ValueError("Request context preparation is only supported for joint_self_attn.")
+        if context.ndim != 3:
+            raise ValueError(f"context must have shape [B, L, text_dim], got {tuple(context.shape)}")
+        if context.shape[-1] != self.text_dim:
+            raise ValueError(f"context last dim must match text_dim={self.text_dim}, got {context.shape[-1]}")
+
+        weight = self.text_embedding[0].weight
+        context = context.to(device=weight.device, dtype=weight.dtype)
+        context_emb = self.text_embedding(context)
+        if context_mask is None:
+            context_mask = torch.ones(context.shape[:2], dtype=torch.bool, device=context.device)
+        else:
+            if context_mask.shape != context.shape[:2]:
+                raise ValueError(
+                    f"context_mask must have shape {tuple(context.shape[:2])}, got {tuple(context_mask.shape)}"
+                )
+            context_mask = context_mask.to(device=context.device, dtype=torch.bool)
+        context_kv = tuple(block.cross_attn.prepare_context_kv(context_emb) for block in self.blocks) if prepare_kv else None
+        return context_emb, context_mask, context_kv
+
     def prepare_state(
         self,
         noisy_actions: torch.Tensor,
@@ -717,6 +762,8 @@ class ActionDiT(ActionDiTBackbone):
         *,
         context: Optional[torch.Tensor] = None,
         context_mask: Optional[torch.Tensor] = None,
+        context_is_embedded: bool = False,
+        context_kv: Optional[tuple] = None,
         use_gradient_checkpointing: bool = False,  # noqa: ARG002 — driver handles ckpt itself
         use_gradient_checkpointing_offload: bool = False,  # noqa: ARG002
     ) -> "ActionState":
@@ -740,6 +787,7 @@ class ActionDiT(ActionDiTBackbone):
                 seq_len=x.shape[1],
                 dtype=x.dtype,
                 device=x.device,
+                context_is_embedded=context_is_embedded,
             )
 
         payload = ActionDiTState(
@@ -749,6 +797,7 @@ class ActionDiT(ActionDiTBackbone):
             action_freqs=action_freqs,
             context=action_context,
             context_mask=action_context_mask,
+            context_kv=context_kv,
         )
         return ActionState(
             action_latents=noisy_actions,
@@ -863,7 +912,13 @@ class ActionDiT(ActionDiTBackbone):
                         "ActionDiTState.context_mask must be [B, L], [B, T_action, L], "
                         f"or broadcastable [B, heads, T_action, L], got {tuple(text_mask.shape)}"
                     )
-            x = x + block.cross_attn(block.context_attn_norm(x), payload.context, ctx_mask=text_mask)
+            context_kv = payload.context_kv[layer_id] if payload.context_kv is not None else None
+            x = x + block.cross_attn(
+                block.context_attn_norm(x),
+                payload.context,
+                ctx_mask=text_mask,
+                context_kv=context_kv,
+            )
         mlp_input = block.ffn_norm(x) * (1 + scale_mlp) + shift_mlp
         x = block.gate(x, gate_mlp, block.ffn(mlp_input))
 

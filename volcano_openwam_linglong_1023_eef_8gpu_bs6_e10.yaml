@@ -1,0 +1,32 @@
+TaskName: "openwam-linglong-1023-eef-8gpu-bs6-e10"
+Description: "2026-10-23 sheet pickup only; local vePFS; 8 GPUs x batch 6 x accumulation 24; 10 epochs from Foundation"
+Tags:
+  - "openwam"
+  - "linglong"
+  - "eef"
+  - "1023"
+UserCodePath: ""
+RemoteMountCodePath: ""
+Entrypoint: >-
+  cd /vePFS/zhuoyu/OpenWAM &&
+  exec bash scripts/launch_volcano_linglong_1023_eef_8gpu.sh
+ImageUrl: "vemlp-cn-beijing.cr.volces.com/preset-images/pytorch:2.12.0-cu13.0.3-py3.11-ubuntu24.04"
+ResourceQueueID: "q-20261015220733-5tvxl"
+Framework: "PyTorchDDP"
+TaskRoleSpecs:
+  - RoleName: "worker"
+    RoleReplicas: 1
+    Flavor: "custom"
+    ResourceSpec:
+      Family: "ml.hpcpni2l"
+      CPU: 105.000
+      Memory: 1875.000
+      GPUNum: 8
+Storages:
+  - Type: "Vepfs"
+    MountPath: "/vePFS"
+    VepfsId: "vepfs-cnbj794253825761"
+ActiveDeadlineSeconds: "48h"
+DelayExitTimeSeconds: "30m"
+AccessType: "Private"
+Priority: 4

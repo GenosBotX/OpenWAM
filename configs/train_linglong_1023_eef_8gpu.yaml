@@ -1,0 +1,21 @@
+# 2026-10-23 sheet pickup only. Prompt does not name an arm.
+# 10 epochs because this collection is 87 train episodes.
+defaults:
+  - train_linglong_20261019_20261020_sheet_eef_8gpu
+  - _self_
+
+dataloader:
+  dataset_dir: /vePFS/data/linglong/linglong_1023_openwam/linglong_openwam_train_15hz
+  normalization_dataset_dir: /vePFS/data/linglong/linglong_1023_openwam/linglong_openwam_train_15hz
+
+training:
+  num_epochs: 10
+  batch_size: 6
+  gradient_accumulation_steps: 24
+  save_steps: 200
+  resume_ckpt_path: null
+  finetune_ckpt_path: /vePFS/zhuoyu/OpenWAM/assets/openwam_ckpt/openwam_alpha/OpenWAM-Alpha-Pretrain-Foundation-Model
+  output_path: /vePFS/zhuoyu/OpenWAM/outputs/linglong_1023_eef_8gpu_bs6_e10
+
+project:
+  output_dir: /vePFS/zhuoyu/OpenWAM/outputs/linglong_1023_eef_8gpu_bs6_e10/hydra

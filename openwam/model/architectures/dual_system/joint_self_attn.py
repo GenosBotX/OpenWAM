@@ -20,11 +20,14 @@ from torch import Tensor
 
 from openwam.model.action_backbone.separate_action_dit import ActionDiT
 from openwam.model.architectures.base import BaseWAMArchitecture
+from openwam.model.architectures.dual_system.cuda_graph_loop import CudaGraphMoTLoop
 from openwam.model.architectures.dual_system.mot_driver import DualSystemMoTDriver
 from openwam.model.architectures.registry import register_architecture
 from openwam.model.architectures.utils.common import resolve_bridge_layers
 from openwam.model.architectures.utils.mask_modes import ACTION_SEES_VIDEO
 from openwam.model.compile_options import (
+    as_bool,
+    cfg_get,
     compile_enabled,
     section_enabled,
     self_attn_compile_cfg,
@@ -50,6 +53,7 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
         self._mot_driver_kwargs: dict = {}
         self._compiled_mot_run_joint_loop: Optional[Callable[..., Tuple[object, object]]] = None
         self._compiled_request_context_kv = None
+        self._cuda_graph_mot_run_joint_loop: Optional[CudaGraphMoTLoop] = None
         if cfg is None:
             return
         if self.video_backbone is not None:
@@ -138,10 +142,22 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
         super().apply_compile_optimizations(compile_cfg)
         self._compiled_mot_run_joint_loop = None
         self._compiled_request_context_kv = None
+        self._cuda_graph_mot_run_joint_loop = None
+        section = self_attn_compile_cfg(compile_cfg)
+        cuda_graph_cfg = cfg_get(section, "cuda_graph", None)
+        if as_bool(cfg_get(cuda_graph_cfg, "enabled", False), default=False):
+            if as_bool(cfg_get(section, "dynamic", False), default=False):
+                raise ValueError("CUDA Graph MoT requires self_attn.dynamic=false")
+            if not section_enabled(section, default=True):
+                raise ValueError("CUDA Graph MoT requires self_attn.enabled=true")
+            if self.video_backbone is None or self.action_backbone is None:
+                raise RuntimeError("CUDA Graph MoT requested before backbones are ready")
+            driver = self._mot_driver or self.build_mot_driver()
+            self._cuda_graph_mot_run_joint_loop = CudaGraphMoTLoop(driver.run_joint_loop)
+            logger.info("Enabled fixed-shape CUDA Graph replay for the dual self-attn MoT loop")
         if not compile_enabled(compile_cfg, default=False, strict=True):
             return
 
-        section = self_attn_compile_cfg(compile_cfg)
         if not section_enabled(section, default=True):
             logger.info("dual self-attn MoT compile disabled by config; running eager.")
             return
@@ -160,14 +176,28 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
             )
 
         kwargs = torch_compile_kwargs(section, default_mode="reduce-overhead")
+        loop_kwargs = dict(kwargs)
+        if self._cuda_graph_mot_run_joint_loop is not None:
+            # Explicit capture owns the graph boundary. Retain the compiler's
+            # other mode options while disabling its nested automatic graphs.
+            mode = loop_kwargs.get("mode", "default")
+            options = dict(torch._inductor.list_mode_options(mode))
+            if options.get("triton.cudagraphs", False):
+                loop_kwargs.pop("mode", None)
+                options["triton.cudagraphs"] = False
+                loop_kwargs["options"] = options
         try:
-            self._compiled_mot_run_joint_loop = torch.compile(_run_joint_loop, **kwargs)
+            self._compiled_mot_run_joint_loop = torch.compile(_run_joint_loop, **loop_kwargs)
             self._compiled_request_context_kv = torch.compile(self._prepare_request_context_kv, **kwargs)
         except Exception as exc:  # pragma: no cover - defensive setup fallback
             self._compiled_mot_run_joint_loop = None
             self._compiled_request_context_kv = None
+            if self._cuda_graph_mot_run_joint_loop is not None:
+                raise RuntimeError("CUDA Graph MoT torch.compile setup failed") from exc
             logger.warning("dual self-attn MoT torch.compile setup failed; running eager: %s", exc)
             return
+        if self._cuda_graph_mot_run_joint_loop is not None:
+            self._cuda_graph_mot_run_joint_loop = CudaGraphMoTLoop(self._compiled_mot_run_joint_loop)
         logger.info("Enabled dual self-attn MoT compile with torch.compile kwargs=%s", kwargs)
 
     def _prepare_request_context_kv(self, video_context, action_context):
@@ -203,8 +233,7 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
         ):
             return inputs_shared
         if any(
-            getattr(block.cross_attn, "has_image_input", False)
-            or not hasattr(block.cross_attn, "prepare_context_kv")
+            getattr(block.cross_attn, "has_image_input", False) or not hasattr(block.cross_attn, "prepare_context_kv")
             for block in dit.blocks
         ):
             return inputs_shared
@@ -228,7 +257,7 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
         try:
             video_context_kv, action_context_kv = prepare_kv(video_context, action_context)
         except Exception:
-            if self._compiled_request_context_kv is None:
+            if self._compiled_request_context_kv is None or self._cuda_graph_mot_run_joint_loop is not None:
                 raise
             # Preserve the original compiled numerical path if preparation
             # cannot be compiled; never silently substitute eager K/V.
@@ -315,7 +344,17 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
             use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
         )
         compiled_loop = getattr(self, "_compiled_mot_run_joint_loop", None)
-        if compiled_loop is not None and not use_gradient_checkpointing and not use_gradient_checkpointing_offload:
+        cuda_graph_loop = getattr(self, "_cuda_graph_mot_run_joint_loop", None)
+        if cuda_graph_loop is not None and (
+            self.training or use_gradient_checkpointing or use_gradient_checkpointing_offload
+        ):
+            raise RuntimeError("CUDA Graph MoT requires eval mode without gradient checkpointing")
+        if cuda_graph_loop is not None and not use_gradient_checkpointing and not use_gradient_checkpointing_offload:
+            try:
+                vstate, astate = cuda_graph_loop(vstate, astate)
+            except Exception as exc:
+                raise RuntimeError("dual self-attn CUDA Graph MoT loop failed") from exc
+        elif compiled_loop is not None and not use_gradient_checkpointing and not use_gradient_checkpointing_offload:
             try:
                 vstate, astate = compiled_loop(vstate, astate)
             except Exception as exc:

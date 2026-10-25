@@ -188,6 +188,16 @@ class JointInferenceEngine(BaseInferenceEngine):
         """Read cfg.optimization and instantiate optimization components."""
         optimization = getattr(self.cfg, "optimization", None)
 
+        # Checkpoint restoration has completed before engine construction.
+        # Quantize before compile/capture so graphs bind the final weights.
+        self._video_quantization = None
+        fp8_cfg = getattr(optimization, "video_fp8", None) if optimization else None
+        if fp8_cfg is not None and getattr(fp8_cfg, "enabled", False):
+            from openwam.deploy.video_fp8 import quantize_video_blocks
+
+            self._video_quantization = quantize_video_blocks(self.architecture)
+            torch.cuda.empty_cache()
+
         # DiT velocity cache
         self._dit_cache = None
         if optimization and getattr(optimization, "dit_cache", None):
@@ -206,6 +216,8 @@ class JointInferenceEngine(BaseInferenceEngine):
             try:
                 self.architecture.apply_compile_optimizations(optimization.compile)
             except Exception as e:
+                if getattr(optimization.compile, "required", False):
+                    raise RuntimeError("Required inference compile setup failed") from e
                 logger.warning("torch.compile optimization failed, continuing without: %s", e)
 
         # VAE decode skip

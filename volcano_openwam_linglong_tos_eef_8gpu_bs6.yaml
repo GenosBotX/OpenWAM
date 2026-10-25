@@ -1,0 +1,21 @@
+TaskName: "openwam-linglong-tos-0923-1017-eef-8gpu-bs6"
+Description: "Full 721-episode Linglong TOS EEF training; 8 GPUs x batch 6 x accumulation 24; window stride 1 (same as Base)"
+Tags:
+  - "openwam"
+  - "linglong"
+  - "tos"
+  - "eef-gtstate"
+Entrypoint: >-
+  cd /vePFS/tangyuting/OpenWAM-tos &&
+  exec bash scripts/launch_volcano_linglong_tos_eef_8gpu_bs6.sh
+ImageUrl: "${imageUrl}"
+ResourceQueueName: "${resourceQueueName}"
+Framework: "PyTorchDDP"
+TaskRoleSpecs:
+  - RoleName: "worker"
+    RoleReplicas: 1
+    Flavor: "${gpuFlavor}"
+ActiveDeadlineSeconds: "7d"
+DelayExitTimeSeconds: "1h"
+AccessType: "Private"
+Priority: 4

@@ -662,7 +662,13 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
     # --- Checkpoint save / load ---
 
-    def save_checkpoint(self, path: str, *, state_dict: dict | None = None) -> None:
+    def save_checkpoint(
+        self,
+        path: str,
+        *,
+        state_dict: dict | None = None,
+        metadata: dict[str, str] | None = None,
+    ) -> None:
         """Save architecture state to safetensors. VLM params excluded (saved separately).
 
         ``state_dict`` defaults to ``self.state_dict()`` (deploy export); the
@@ -674,7 +680,10 @@ class BaseWAMArchitecture(ABC, nn.Module):
             state_dict = self.state_dict()
         state_dict = _exclude_vlm_from_state_dict(state_dict)
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        save_file(state_dict, path)
+        if metadata is None:
+            save_file(state_dict, path)
+        else:
+            save_file(state_dict, path, metadata={str(k): str(v) for k, v in metadata.items()})
 
     def load_checkpoint(self, path: str, strict: bool = True) -> None:
         """Load architecture state from a safetensors checkpoint.
@@ -693,11 +702,20 @@ class BaseWAMArchitecture(ABC, nn.Module):
         actually exist so the training-resume path (real-device params,
         in-place copy preserves identity) is unchanged.
         """
-        from safetensors.torch import load_file
+        from openwam.train.utils.trainable_checkpoint import load_checkpoint_state, read_manifest
 
-        state_dict = load_file(path)
+        manifest = read_manifest(path)
+        if manifest is not None:
+            logger.info(
+                "Loading trainable overlay step=%s: %d parameters, %d buffers; base SHA-256=%s",
+                manifest.get("global_step"), len(manifest["trainable_parameters"]),
+                len(manifest["persistent_buffers"]), manifest["base"]["sha256"],
+            )
+        state_dict = load_checkpoint_state(path)
+        # An overlay must restore the complete model even for a non-strict call.
+        strict = strict or manifest is not None
         has_vlm = getattr(self, "vlm_backbone", None) is not None
-        has_meta = any(p.device.type == "meta" for p in self.parameters())
+        has_meta = any(t.device.type == "meta" for t in self.state_dict().values())
         missing, unexpected = self.load_state_dict(state_dict, strict=False, assign=has_meta)
         if strict and not has_vlm:
             if missing or unexpected:
@@ -708,6 +726,8 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 raise RuntimeError(
                     f"Strict load failed (VLM keys excluded): missing={non_vlm_missing}, unexpected={unexpected}"
                 )
+
+        self._loaded_checkpoint_path = os.path.abspath(path)
 
     # --- Training: module management ---
 

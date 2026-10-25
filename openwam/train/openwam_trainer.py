@@ -226,12 +226,15 @@ class OpenWAMTrainer:
             if save_steps is not None:
                 save_steps = int(save_steps)
         keep_last_k = int(getattr(t, "keep_last_k_ckpts", 2))
-        save_full_states_for_resume = bool(getattr(t, "save_full_states_for_resume", False))
+        save_full_states_for_resume = bool(getattr(t, "save_full_states_for_resume", True))
 
         # Finetune warm-start weights were already loaded at architecture
         # construction (__init__, self-contained ckpt-dir path). Step stays 0.
 
         output_path, resume_state_dir = self.setup_output_dir(debug, resume_path)
+        self._checkpoint_overlay = None
+        if resume_state_dir is None:
+            self.configure_checkpoint_overlay(output_path)
         optimizer, dataloader, scheduler = self.prepare_accelerate(optimizer, dataloader, scheduler)
         self._resume_context = {
             "at_optimizer_boundary": True,
@@ -247,6 +250,7 @@ class OpenWAMTrainer:
             self.accelerator,
             enabled=bool(getattr(t, "async_checkpoints", False)),
             staging_root=cfg_get(t, "checkpoint_staging_dir", None) or None,
+            overlay_config=self._checkpoint_overlay,
         )
 
         if self._run_seed is not None:
@@ -287,6 +291,8 @@ class OpenWAMTrainer:
                 resume_state_dir, dataloader, grad_accum
             )
             self._last_full_state_step = global_step
+            self.configure_checkpoint_overlay(output_path)
+            self._ckpt_publisher.overlay_config = self._checkpoint_overlay
             already_done = (num_epochs is not None and start_epoch >= num_epochs) or (
                 max_steps and global_step >= max_steps
             )
@@ -459,7 +465,7 @@ class OpenWAMTrainer:
 
             kwargs["generator"] = make_dataloader_generator(self._run_seed, rank=self._rank)
             kwargs["worker_init_fn"] = dataloader_worker_init_fn
-            if shuffle and bool(getattr(t, "save_full_states_for_resume", False)):
+            if shuffle and bool(getattr(t, "save_full_states_for_resume", True)):
                 from accelerate.data_loader import SeedableRandomSampler
 
                 # A stateful RandomSampler generator advances with prior epochs;
@@ -594,7 +600,7 @@ class OpenWAMTrainer:
             for key, value in expected.items():
                 if context.get(key) != value:
                     raise ValueError(f"Resume mismatch for {key}: saved={context.get(key)!r}, current={value!r}")
-        meta = load_full_state(self.accelerator, resume_state_dir)
+        meta = load_full_state(self.accelerator, resume_state_dir, architecture=self.architecture)
         global_step = int(meta.get("global_step", 0))
         # New saves carry exact optimizer-boundary progress. Preserve the legacy
         # alignment only for old state directories without this contract.
@@ -715,6 +721,48 @@ class OpenWAMTrainer:
                 steps_per_sec=steps_per_sec,
             )
 
+    def configure_checkpoint_overlay(self, output_path):
+        """Validate the frozen base once on rank zero and share its manifest."""
+        t = self.cfg.training
+        if not bool(cfg_get(t, "save_trainable_only", False)):
+            return
+        distributed_type = str(getattr(self.accelerator, "distributed_type", ""))
+        plugin = getattr(getattr(self.accelerator, "state", None), "deepspeed_plugin", None)
+        zero_stage = max(
+            int(cfg_get(t, "zero_stage", 0) or 0),
+            int(getattr(plugin, "zero_stage", 0) or 0),
+        )
+        if zero_stage > 2 or "FSDP" in distributed_type:
+            raise ValueError("save_trainable_only supports replicated parameters (DDP / ZeRO-1/2), not FSDP / ZeRO-3")
+        from accelerate.utils import broadcast_object_list
+        from openwam.train.utils.trainable_checkpoint import prepare_overlay
+
+        payload = [None, None]
+        if self.accelerator.is_main_process:
+            try:
+                architecture = self.accelerator.unwrap_model(self.architecture)
+                source = cfg_get(t, "checkpoint_base_path", None) or None
+                if source is None and not getattr(architecture, "_loaded_checkpoint_path", None):
+                    source = cfg_get(t, "resume_ckpt_path", None) or None
+                payload[0] = prepare_overlay(
+                    architecture, base_path=source,
+                    base_url=cfg_get(t, "checkpoint_base_url", None) or None,
+                    base_sha256=cfg_get(t, "checkpoint_base_sha256", None) or None,
+                    output_path=output_path,
+                )
+            except Exception as exc:
+                payload[1] = f"{type(exc).__name__}: {exc}"
+        broadcast_object_list(payload, from_process=0)
+        if payload[1]:
+            raise RuntimeError(f"Trainable checkpoint setup failed: {payload[1]}")
+        self._checkpoint_overlay = payload[0]
+        if self.accelerator.is_main_process:
+            logger.info(
+                "Trainable checkpoints enabled: %d parameter tensors + %d buffers; base=%s sha256=%s",
+                len(payload[0]["trainable_parameters"]), len(payload[0]["persistent_buffers"]),
+                payload[0]["base"]["path"], payload[0]["base"]["sha256"],
+            )
+
     def publish_checkpoint(
         self, output_path, global_step, opt_step, epoch, *, final: bool, keep_last_k: int, save_full_state: bool,
     ):
@@ -757,7 +805,7 @@ class OpenWAMTrainer:
         Falsy ``save_steps`` = a profiling/no-write run, so no final artifact (matches the
         periodic-save gating). All ranks participate in the full-state save.
         """
-        full_state = bool(getattr(self.cfg.training, "save_full_states_for_resume", False))
+        full_state = bool(getattr(self.cfg.training, "save_full_states_for_resume", True))
         if save_steps:
             if full_state and not self.accelerator.sync_gradients:
                 raise RuntimeError("Cannot save full state with partially accumulated gradients")

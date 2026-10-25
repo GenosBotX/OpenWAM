@@ -50,8 +50,12 @@ training:
   # --- Checkpoint ---
   output_path: outputs/openwam_checkpoints            # Base directory for checkpoint output (relative to the launch cwd)
   save_steps: 2000                # Save checkpoint every N steps (0 or null = disable saving)
-  save_full_states_for_resume: false  # Also save resumable full state (optimizer/scheduler/RNG) at each save;
-                                      # required for training.resume_ckpt_path, costs extra disk per checkpoint
+  save_full_states_for_resume: true  # 默认保存优化器、调度器、随机数和训练进度，用于 resume
+                                     # save_trainable_only=true 时续训断点也不重复保存冻结参数
+  save_trainable_only: false       # 只保存可训练参数和持久 buffer；基础权重通过 SHA-256 校验
+  checkpoint_base_path: null       # 完整基础权重；默认使用实际加载的 finetune checkpoint
+  checkpoint_base_url: null        # 基础权重的公共 HTTPS 地址；本机没有匹配文件时下载
+  checkpoint_base_sha256: null     # 可选的预期哈希；保存时始终记录实际 SHA-256
   keep_last_k_ckpts: 1           # Rolling window: keep only the last K checkpoints
   async_checkpoints: false        # Stage the checkpoint locally and copy it in the background
   checkpoint_staging_dir: null    # Fast local directory for that snapshot; null uses /dev/shm when it has room

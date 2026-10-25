@@ -63,7 +63,7 @@ def load_from_checkpoint_dir(
     device: str = "cuda",
     ckpt_name: Optional[str] = None,
 ) -> Tuple[DictConfig, BaseWAMArchitecture]:
-    """Load full model from a self-contained checkpoint directory.
+    """Load a model from full weights or a trainable overlay plus its verified base.
 
     The directory must contain:
       - ``config.yaml`` — Hydra config saved during training.
@@ -202,7 +202,8 @@ def load_from_checkpoint_dir(
         resolved_arch.canonical.variant,
     )
 
-    # 4. Load all weights from checkpoint
+    # 4. The architecture loader recognizes both full weights and trainable
+    # overlays. Inference and WebSocket serving deliberately share this path.
     architecture.load_checkpoint(ckpt_path)
 
     # 5. Move to device and set eval mode — top-down: architecture → video_backbone → submodules.

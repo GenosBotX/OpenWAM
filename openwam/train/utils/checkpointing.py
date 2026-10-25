@@ -15,7 +15,6 @@ _NORMALIZATION_SEMANTIC_KEYS = (
     "osc_rotation_scale",
 )
 
-
 # --- Deploy assets (write-once) ---
 
 
@@ -205,7 +204,15 @@ def weights_path(output_path: str, global_step: int) -> str:
     return os.path.join(output_path, f"checkpoint_step_{global_step}.safetensors")
 
 
-def write_weights_atomic(architecture, output_path: str, global_step: int, state_dict) -> str:
+def write_weights_atomic(
+    architecture,
+    output_path: str,
+    global_step: int,
+    state_dict,
+    *,
+    trainable_only: bool = False,
+    overlay_config: dict | None = None,
+) -> str:
     """Write weights to a side directory, then rename into the final filename.
 
     The final name is what ``find_latest_weights`` selects, so a crashed write
@@ -216,12 +223,30 @@ def write_weights_atomic(architecture, output_path: str, global_step: int, state
     os.makedirs(partial_dir, exist_ok=True)
     partial = os.path.join(partial_dir, f"checkpoint_step_{global_step}.safetensors")
     final_path = weights_path(output_path, global_step)
-    architecture.save_checkpoint(partial, state_dict=state_dict)
+    if trainable_only:
+        from openwam.train.utils.trainable_checkpoint import checkpoint_metadata
+
+        if overlay_config is None:
+            raise ValueError("Trainable checkpoint has no validated base manifest")
+        metadata = checkpoint_metadata(overlay_config, state_dict, global_step)
+        architecture.save_checkpoint(partial, state_dict=state_dict, metadata=metadata)
+    else:
+        architecture.save_checkpoint(partial, state_dict=state_dict)
+    # The authoritative manifest is embedded in the same atomic weights file.
     os.replace(partial, final_path)
     return final_path
 
 
-def save_weights(accelerator, architecture, output_path: str, global_step: int, *, final: bool) -> None:
+def save_weights(
+    accelerator,
+    architecture,
+    output_path: str,
+    global_step: int,
+    *,
+    final: bool,
+    trainable_only: bool = False,
+    overlay_config: dict | None = None,
+) -> None:
     """Write the weights safetensors (the deploy artifact).
 
     Only rank-0 writes. ZeRO-1/2 (this repo's only stages, see
@@ -239,17 +264,32 @@ def save_weights(accelerator, architecture, output_path: str, global_step: int, 
     msg = f"[checkpoint] Saving {'final ' if final else ''}step {global_step} -> {ckpt_path}"
     logger.info(msg)
     tqdm.write(msg)
-    state_dict = accelerator.get_state_dict(architecture)
-    write_weights_atomic(accelerator.unwrap_model(architecture), output_path, global_step, state_dict)
+    unwrapped = accelerator.unwrap_model(architecture)
+    if trainable_only:
+        from openwam.train.utils.trainable_checkpoint import snapshot_trainable
+
+        if overlay_config is None:
+            raise ValueError("Trainable checkpoint has no validated base manifest")
+        state_dict = snapshot_trainable(unwrapped, overlay_config)
+    else:
+        state_dict = accelerator.get_state_dict(architecture)
+    write_weights_atomic(
+        unwrapped,
+        output_path,
+        global_step,
+        state_dict,
+        trainable_only=trainable_only,
+        overlay_config=overlay_config,
+    )
     msg = f"[checkpoint] Saved{' final' if final else ''}: {ckpt_path}"
     logger.info(msg)
     tqdm.write(msg)
 
 
 def save_full_state(
-    accelerator, output_path: str, global_step: int, opt_step: int, epoch: int, *, resume_context=None
+    accelerator, output_path: str, global_step: int, opt_step: int, epoch: int, *, resume_context=None, overlay_config=None
 ) -> None:
-    """Write full Accelerate state to ``accel_state_step_N/`` for resume.
+    """Write resumable Accelerate state to ``accel_state_step_N/`` for resume.
 
     ALL ranks enter (DeepSpeed shards optimizer state per-rank). rank-0 writes the
     ``trainer_state.json`` marker last (atomic) so a half-written dir is never picked
@@ -263,16 +303,19 @@ def save_full_state(
         if os.path.exists(marker):
             os.remove(marker)
     accelerator.wait_for_everyone()
-    accelerator.save_state(state_dir)
+    from openwam.train.utils.compact_resume import resume_descriptor, save_accelerator_state
+
+    save_accelerator_state(accelerator, state_dir, trainable_only=overlay_config is not None)
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         write_trainer_state(
-            state_dir, global_step=global_step, opt_step=opt_step, epoch=epoch, resume_context=resume_context
+            state_dir, global_step=global_step, opt_step=opt_step, epoch=epoch, resume_context=resume_context,
+            model_checkpoint=resume_descriptor(global_step, overlay_config),
         )
     accelerator.wait_for_everyone()
 
 
-def write_trainer_state(state_dir: str, *, global_step: int, opt_step: int, epoch: int, resume_context=None) -> None:
+def write_trainer_state(state_dir: str, *, global_step: int, opt_step: int, epoch: int, resume_context=None, model_checkpoint=None) -> None:
     """Atomically publish the completion marker for ``state_dir``.
 
     ``find_latest_accel_state`` treats this file as proof that the sharded
@@ -285,6 +328,8 @@ def write_trainer_state(state_dir: str, *, global_step: int, opt_step: int, epoc
     meta = {"global_step": int(global_step), "opt_step": int(opt_step), "epoch": int(epoch)}
     if resume_context is not None:
         meta["resume_context"] = resume_context
+    if model_checkpoint is not None:
+        meta["model_checkpoint"] = model_checkpoint
     meta_path = os.path.join(state_dir, "trainer_state.json")
     tmp_path = meta_path + ".tmp"
     with open(tmp_path, "w") as f:
@@ -292,19 +337,22 @@ def write_trainer_state(state_dir: str, *, global_step: int, opt_step: int, epoc
     os.replace(tmp_path, meta_path)
 
 
-def load_full_state(accelerator, state_dir: str) -> dict:
-    """Restore optimizer/scheduler/RNG/model from ``state_dir`` (call AFTER prepare).
-
-    Returns the ``trainer_state.json`` contents (global_step / opt_step / epoch).
-    """
+def load_full_state(accelerator, state_dir: str, *, architecture=None) -> dict:
+    """Restore legacy full state or a paired overlay and optimizer state."""
     import json
 
-    accelerator.load_state(state_dir)
     meta_path = os.path.join(state_dir, "trainer_state.json")
-    if os.path.isfile(meta_path):
-        with open(meta_path) as f:
-            return json.load(f)
-    return {"global_step": 0, "opt_step": 0, "epoch": 0}
+    with open(meta_path) as f:
+        meta = json.load(f)
+    if "model_checkpoint" in meta:
+        from openwam.train.utils.compact_resume import load_compact_state
+
+        if architecture is None:
+            raise ValueError("Compact resume requires the prepared architecture")
+        load_compact_state(accelerator, state_dir, meta, architecture)
+    else:
+        accelerator.load_state(state_dir)
+    return meta
 
 
 # --- Discovery (locate latest step) ---
@@ -344,7 +392,7 @@ def find_latest_weights(run_dir: str) -> str:
 def find_latest_accel_state(run_dir: str) -> str | None:
     """Return the highest-step *usable* ``accel_state_step_N/`` in *run_dir*, or None.
 
-    Usable = ``trainer_state.json`` present. ``save_full_state`` writes that marker
+    Usable = completion marker present and, for compact states, matching overlay present. ``save_full_state`` writes that marker
     atomically AFTER ``accelerator.save_state`` returns, so its presence proves the
     (possibly large / sharded) state finished writing. DeepSpeed's ``save_state``
     writes a ``pytorch_model/`` dir and no ``random_states_*.pkl``, so the marker —
@@ -358,6 +406,18 @@ def find_latest_accel_state(run_dir: str) -> str | None:
             continue
         state_dir = os.path.join(run_dir, name)
         if not os.path.isfile(os.path.join(state_dir, "trainer_state.json")):
+            continue
+        try:
+            import json
+
+            with open(os.path.join(state_dir, "trainer_state.json")) as handle:
+                meta = json.load(handle)
+            if "model_checkpoint" in meta:
+                from openwam.train.utils.compact_resume import paired_overlay
+
+                paired_overlay(state_dir, meta)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            logger.warning("Skipping unusable resume checkpoint %s: %s", state_dir, exc)
             continue
         step = step_num(name, "accel_state_step_")
         if best is None or step > best[0]:

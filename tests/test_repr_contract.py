@@ -23,6 +23,27 @@ def test_repr_contract_defaults():
     assert contract == {"representation": "joint"}
 
 
+def test_piper_x_eef20_contract_and_runtime_chunk_length():
+    cfg = OmegaConf.create({
+        "dataloader": {"type": "piper_x", "action_mode": "eef", "normalize_mode": "min-max"},
+        "model": {"architecture": {"state_dim": 80, "action_dim": 80}},
+        "inference": {"action_response_mode": "chunk", "num_frames": 33},
+    })
+    contract = repr_contract_from_cfg(cfg)
+    assert contract["contract_id"] == "piper-x-absolute-eef20-v1"
+    assert contract["image_color_order"] == "rgb"
+    assert contract["prompt_template"] == "raw"
+    assert contract["gripper_open_width_m"] == 0.1
+    assert contract["endpoint"] == "tcp_link"
+    engine = SimpleNamespace(architecture=SimpleNamespace(repr_contract=contract))
+    assert PolicyServer(engine=engine, cfg=cfg)._pong_payload()["num_actions"] == 32
+    cfg.dataloader.action_mode = "eef_quat"
+    assert "contract_id" not in repr_contract_from_cfg(cfg)
+    cfg.dataloader.action_mode = "eef"
+    cfg.dataloader.relative_to_state = True
+    assert "contract_id" not in repr_contract_from_cfg(cfg)
+
+
 def test_repr_contract_preserves_optional_legacy_markers():
     cfg = OmegaConf.create(
         {

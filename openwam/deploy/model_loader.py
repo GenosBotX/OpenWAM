@@ -269,6 +269,35 @@ def repr_contract_from_cfg(cfg: DictConfig) -> dict:
         contract["binary_action_dims"] = [int(d) for d in dims]
     if gripper_convention is not None:
         contract["gripper_convention"] = gripper_convention
+    if (
+        OmegaConf.select(cfg, "dataloader.type") == "piper_x"
+        and contract["representation"] == "eef"
+        and OmegaConf.select(cfg, "dataloader.relative_to_state", default=False) is False
+        and OmegaConf.select(cfg, "dataloader.normalize_mode") == "min-max"
+    ):
+        # The Piper-X reader packs absolute poses as xyz + two rotation
+        # columns + aperture. This is a distinct contract from RoboDojo:
+        # training uses RGB images, raw task text and a 100 mm grip scale.
+        contract.update(
+            embodiment="piper_x",
+            contract_id="piper-x-absolute-eef20-v1",
+            state_dim=20,
+            action_dim=20,
+            model_state_dim=int(OmegaConf.select(cfg, "model.architecture.state_dim", default=80)),
+            model_action_dim=int(OmegaConf.select(cfg, "model.architecture.action_dim", default=80)),
+            eef_layout=["left.xyz", "left.rot6d", "left.gripper", "right.xyz", "right.rot6d", "right.gripper"],
+            rotation_representation="rot6d_first_two_columns_concatenated",
+            position_units="meters",
+            target_frame="per_arm_robot_base",
+            endpoint="tcp_link",
+            state_endpoint="recorded_ee_pose",
+            action_target="absolute_pose",
+            gripper_convention="zero_closed_one_open",
+            gripper_open_width_m=0.1,
+            normalization="server_side_min_max",
+            image_color_order="rgb",
+            prompt_template="raw",
+        )
     return contract
 
 

@@ -82,6 +82,7 @@ MAX_MESSAGE_BYTES = 32 * 1024 * 1024
 
 def _action_response_mode(cfg) -> str:
     from omegaconf import OmegaConf
+
     from openwam.deploy.executors import resolve_execution_config
 
     mode = OmegaConf.select(cfg, "inference.action_response_mode", default="single")
@@ -207,6 +208,12 @@ class PolicyServer:
             result["representation"] = "eef"
         if self.action_response_mode == "chunk":
             result["action_response_mode"] = "chunk"
+            if "action_dim" in result:
+                from omegaconf import OmegaConf
+
+                num_frames = OmegaConf.select(self.cfg, "inference.num_frames", default=None)
+                if num_frames is not None:
+                    result["num_actions"] = int(num_frames) - 1
         if self.readiness_token is not None:
             result["readiness_token"] = self.readiness_token
         return result

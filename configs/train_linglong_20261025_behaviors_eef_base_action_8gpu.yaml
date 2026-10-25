@@ -1,0 +1,26 @@
+# 16D EEF proprio and images in; 16D EEF plus chassis action[:, 22:24] out.
+# Official EEF configs stay 16D. This run is the behaviors bucket only.
+defaults:
+  - train_linglong_tos
+  - _self_
+
+dataloader:
+  dataset_dir: tos://ml-platform-auto-created-required-2109640594-cn-beijing/linglong/openwam/linglong/20261025_behaviors_pickup_move_place_train_v1
+  normalization_dataset_dir: ${dataloader.dataset_dir}
+  supervise_base_action: true
+  unify_action_map: ["0-6", 9, "34-40", 43, 74, 75]
+  unify_state_map: ["0-6", 9, "34-40", 43]
+  active_raw_action_dims: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+  active_raw_state_dims: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+
+training:
+  num_epochs: 10
+  finetune_ckpt_path: /vePFS/zhuoyu/OpenWAM/assets/openwam_ckpt/openwam_alpha/OpenWAM-Alpha-Pretrain-Foundation-Model
+  resume_ckpt_path: null
+  save_steps: 2000
+  save_full_states_for_resume: true
+  keep_last_k_ckpts: 2
+  output_path: /vePFS/zhuoyu/OpenWAM/outputs/linglong_20261025_behaviors_eef_base_action_8gpu_e10
+
+project:
+  output_dir: /vePFS/zhuoyu/OpenWAM/outputs/linglong_20261025_behaviors_eef_base_action_8gpu_e10/hydra

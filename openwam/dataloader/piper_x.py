@@ -22,6 +22,7 @@ applies the inverse before the command leaves the engine.
 from __future__ import annotations
 
 import json
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
@@ -33,6 +34,8 @@ import torch
 from PIL import Image
 
 from openwam.dataloader.bases import BaseDataset
+from openwam.dataloader.demospeedup import build_keep_plan
+from openwam.dataloader.tos_cache import BoundedTosCache, DatasetStorage
 from openwam.dataloader.transforms.multiview import assemble_multiview_layout
 from openwam.dataloader.utils import get_cfg
 from openwam.dataloader.utils.normalization import ROT6D_DIMS_EEF20, apply_normalization, pin_rot6d_identity
@@ -114,6 +117,31 @@ def _eef20_stats(bucket: str) -> tuple[dict, dict]:
     return _vector_stats(action, pin_rot6d=True), _vector_stats(state, pin_rot6d=True)
 
 
+def _episode_columns(storage: DatasetStorage, index: int, columns: list[str]):
+    relative = f"data/chunk-{index // 1000:03d}/episode_{index:06d}.parquet"
+    with storage.open(relative) as handle:
+        table = pq.read_table(handle, columns=columns)
+    return {name: np.asarray(table[name].to_pylist(), dtype=np.float32) for name in columns}
+
+
+def _eef20_stats_from_storage(storage: DatasetStorage) -> tuple[dict, dict]:
+    """Train-frame 20D stats from one bucket. Rotation 6D stays at identity."""
+    episodes = [
+        json.loads(line)
+        for line in storage.text("meta/episodes.jsonl").splitlines()
+        if line.strip()
+    ]
+    state_rows = []
+    action_rows = []
+    for index in range(len(episodes)):
+        columns = _episode_columns(storage, index, [STATE_COLUMN, ACTION_COLUMN])
+        state_rows.append(columns[STATE_COLUMN])
+        action_rows.append(columns[ACTION_COLUMN])
+    state = _pack_eef20(np.concatenate(state_rows, axis=0))
+    action = _pack_eef20(np.concatenate(action_rows, axis=0))
+    return _vector_stats(action, pin_rot6d=True), _vector_stats(state, pin_rot6d=True)
+
+
 @lru_cache(maxsize=8)
 def _relative_action_stats(bucket: str, action_mode: str, window_stride: int) -> dict:
     """Action statistics after expressing every training window in its initial state."""
@@ -152,13 +180,24 @@ class PiperXDataset(BaseDataset):
 
     @classmethod
     def from_config(cls, config, split: str = "train"):
-        dataset_dir = Path(get_cfg(config, "dataset_dir"))
-        if split in ("test", "val") and dataset_dir.name.endswith("_train_15hz"):
-            candidate = dataset_dir.with_name(dataset_dir.name.replace("_train_15hz", "_test_15hz"))
-            if candidate.is_dir():
-                dataset_dir = candidate
+        raw_dir = str(get_cfg(config, "dataset_dir"))
+        remote = raw_dir.startswith("tos://")
+        if remote and split in ("test", "val"):
+            dataset_dir = get_cfg(config, "eval_dataset_dir", None)
+            if not dataset_dir:
+                raise ValueError("TOS evaluation requires explicit eval_dataset_dir")
+            dataset_dir = str(dataset_dir)
+        elif remote:
+            # Path() collapses the second slash in tos://, so keep the URI as text.
+            dataset_dir = raw_dir
+        else:
+            dataset_dir = Path(raw_dir)
+            if split in ("test", "val") and dataset_dir.name.endswith("_train_15hz"):
+                candidate = dataset_dir.with_name(dataset_dir.name.replace("_train_15hz", "_test_15hz"))
+                if candidate.is_dir():
+                    dataset_dir = candidate
         normalization_dataset_dir = get_cfg(config, "normalization_dataset_dir", None)
-        if split in ("test", "val") and not normalization_dataset_dir:
+        if split in ("test", "val") and not normalization_dataset_dir and not remote:
             if not dataset_dir.name.endswith("_test_15hz"):
                 raise ValueError("Piper X evaluation needs normalization_dataset_dir pointing at the training bucket")
             normalization_dataset_dir = dataset_dir.with_name(
@@ -186,6 +225,17 @@ class PiperXDataset(BaseDataset):
             normalization_dataset_dir=normalization_dataset_dir,
             active_raw_action_dims=get_cfg(config, "active_raw_action_dims", None),
             active_raw_state_dims=get_cfg(config, "active_raw_state_dims", None),
+            cache_dir=get_cfg(config, "cache_dir", "/tmp/openwam-tos-cache"),
+            cache_max_bytes=int(get_cfg(config, "cache_max_bytes", 4 * 1024**3)),
+            cache_min_free_bytes=int(get_cfg(config, "cache_min_free_bytes", 1024**3)),
+            demospeedup_enabled=bool(get_cfg(config, "demospeedup_enabled", False)),
+            demospeedup_entropy_dir=get_cfg(config, "demospeedup_entropy_dir", None),
+            demospeedup_r_precision=int(get_cfg(config, "demospeedup_r_precision", 2)),
+            demospeedup_r_casual=int(get_cfg(config, "demospeedup_r_casual", 3)),
+            demospeedup_num_offsets=get_cfg(config, "demospeedup_num_offsets", None),
+            demospeedup_gripper_radius=int(get_cfg(config, "demospeedup_gripper_radius", 3)),
+            demospeedup_gripper_delta=float(get_cfg(config, "demospeedup_gripper_delta", 0.25)),
+            demospeedup_smooth_width=int(get_cfg(config, "demospeedup_smooth_width", 9)),
         )
 
     def __init__(
@@ -212,8 +262,27 @@ class PiperXDataset(BaseDataset):
         normalization_dataset_dir=None,
         active_raw_action_dims=None,
         active_raw_state_dims=None,
+        cache_dir="/tmp/openwam-tos-cache",
+        cache_max_bytes=4 * 1024**3,
+        cache_min_free_bytes=1024**3,
+        demospeedup_enabled: bool = False,
+        demospeedup_entropy_dir: str | None = None,
+        demospeedup_r_precision: int = 2,
+        demospeedup_r_casual: int = 3,
+        demospeedup_num_offsets: int | None = None,
+        demospeedup_gripper_radius: int = 3,
+        demospeedup_gripper_delta: float = 0.25,
+        demospeedup_smooth_width: int = 9,
     ):
-        self.dataset_dir = Path(dataset_dir)
+        dataset_dir = str(dataset_dir)
+        self._remote = dataset_dir.startswith("tos://")
+        stats_remote = str(normalization_dataset_dir).startswith("tos://") if normalization_dataset_dir else False
+        self.tos_cache = (
+            BoundedTosCache(cache_dir, cache_max_bytes, cache_min_free_bytes)
+            if self._remote or stats_remote else None
+        )
+        self.dataset_dir = dataset_dir if self._remote else Path(dataset_dir)
+        self._storage = DatasetStorage(self.dataset_dir, self.tos_cache)
         self.split = str(split)
         self.action_mode = str(action_mode)
         if self.action_mode not in ACTION_MODES:
@@ -249,22 +318,28 @@ class PiperXDataset(BaseDataset):
         if self.overfit_single and self.overfit_repeats < 1:
             raise ValueError("overfit_repeats must be >= 1")
 
-        manifest = self._read_manifest(self.dataset_dir, self.split)
-        self._source_root = self.dataset_dir / str(manifest.get("source_root", "."))
-        if not self._source_root.is_dir():
-            raise FileNotFoundError(f"Piper X images are missing under {self._source_root}")
+        manifest = self._read_manifest(self._storage, self.split)
+        image_root = str(manifest.get("source_root", "."))
+        if self._remote:
+            if image_root not in (".", ""):
+                raise ValueError("TOS Piper X buckets keep images under source_root '.'")
+            self._source_root = self.dataset_dir
+        else:
+            self._source_root = Path(self.dataset_dir) / image_root
+            if not self._source_root.is_dir():
+                raise FileNotFoundError(f"Piper X images are missing under {self._source_root}")
         self._prompt = str(manifest["prompt"])
         self._episodes = [
             json.loads(line)
-            for line in (self.dataset_dir / "meta" / "episodes.jsonl").read_text().splitlines()
+            for line in self._storage.text("meta/episodes.jsonl").splitlines()
             if line.strip()
         ]
         self._tables = [
-            self.dataset_dir / "data" / f"chunk-{index // 1000:03d}" / f"episode_{index:06d}.parquet"
+            f"data/chunk-{index // 1000:03d}/episode_{index:06d}.parquet"
             for index in range(len(self._episodes))
         ]
-        if any(not path.is_file() for path in self._tables):
-            raise FileNotFoundError(f"Piper X episode parquet is missing under {self.dataset_dir / 'data'}")
+        if not self._remote and any(not (Path(self.dataset_dir) / relative).is_file() for relative in self._tables):
+            raise FileNotFoundError(f"Piper X episode parquet is missing under {Path(self.dataset_dir) / 'data'}")
 
         action_dims = active_raw_action_dims
         state_dims = active_raw_state_dims
@@ -298,10 +373,59 @@ class PiperXDataset(BaseDataset):
             self._state_dim = self.raw_dim
 
         self._windows = []
-        for local, episode in enumerate(self._episodes):
-            max_start = int(episode["length"]) - self.num_frames
-            if max_start >= 0:
-                self._windows.extend((local, start) for start in range(0, max_start + 1, self.window_stride))
+        self._kept = None
+        self.demospeedup_summary = None
+        use_demospeedup = bool(demospeedup_enabled) and self.split == "train"
+        if use_demospeedup:
+            if not demospeedup_entropy_dir:
+                raise ValueError("demospeedup_entropy_dir is required when demospeedup_enabled is true")
+            for local, episode in enumerate(self._episodes):
+                if int(episode["episode_index"]) != local:
+                    raise ValueError(
+                        "DemoSpeedup expects episodes.jsonl ordered by episode_index, "
+                        f"but row {local} has episode_index={episode['episode_index']}"
+                    )
+            plan = build_keep_plan(
+                self._episodes,
+                self._tables,
+                Path(demospeedup_entropy_dir),
+                r_precision=int(demospeedup_r_precision),
+                r_casual=int(demospeedup_r_casual),
+                num_offsets=None if demospeedup_num_offsets is None else int(demospeedup_num_offsets),
+                gripper_radius=int(demospeedup_gripper_radius),
+                gripper_delta=float(demospeedup_gripper_delta),
+                smooth_width=int(demospeedup_smooth_width),
+                min_frames=self.num_frames,
+                read_table=self._read_parquet,
+            )
+            self._kept = plan.tables
+            for local, episode in enumerate(self._episodes):
+                for offset, kept in enumerate(plan.tables[local]):
+                    max_start = len(kept) - self.num_frames
+                    if max_start >= 0:
+                        self._windows.extend(
+                            (local, start, offset) for start in range(0, max_start + 1, self.window_stride)
+                        )
+            summary = dict(plan.summary)
+            summary["windows"] = len(self._windows)
+            self.demospeedup_summary = summary
+            if os.environ.get("LOCAL_RANK", "0") in ("0", ""):
+                print(
+                    "[demospeedup] "
+                    f"windows={summary['windows']} "
+                    f"keep_ratio={summary['mean_keep_ratio']:.4f} "
+                    f"dropped_phases={summary['dropped_phases']}/{summary['phases']} "
+                    f"precision_frames={summary['precision_frames']}/{summary['source_frames']} "
+                    f"threshold={summary['threshold']:.6f} "
+                    f"offsets={summary['num_offsets']} r_precision={summary['r_precision']} "
+                    f"r_casual={summary['r_casual']}",
+                    flush=True,
+                )
+        else:
+            for local, episode in enumerate(self._episodes):
+                max_start = int(episode["length"]) - self.num_frames
+                if max_start >= 0:
+                    self._windows.extend((local, start) for start in range(0, max_start + 1, self.window_stride))
         if not self._windows:
             raise ValueError(f"Piper X split={self.split!r} has no {self.num_frames}-frame windows")
         if self.overfit_single:
@@ -312,23 +436,38 @@ class PiperXDataset(BaseDataset):
                 raise ValueError(f"overfit_episode={self.overfit_episode} has no full window")
             self._windows = episode_windows * self.overfit_repeats
 
-        if normalization_dataset_dir is None and self.split in ("test", "val") and self.dataset_dir.name.endswith("_test_15hz"):
+        if (
+            normalization_dataset_dir is None
+            and self.split in ("test", "val")
+            and not self._remote
+            and self.dataset_dir.name.endswith("_test_15hz")
+        ):
             normalization_dataset_dir = self.dataset_dir.with_name(
                 self.dataset_dir.name[: -len("_test_15hz")] + "_train_15hz"
             )
-        stats_dir = self.dataset_dir if normalization_dataset_dir is None else Path(normalization_dataset_dir)
+        stats_dir = self.dataset_dir if normalization_dataset_dir is None else str(normalization_dataset_dir)
+        stats_storage = self._storage if str(stats_dir) == str(self.dataset_dir) else DatasetStorage(stats_dir, self.tos_cache)
         if self.split in ("test", "val"):
-            train_manifest = self._read_manifest(stats_dir, "train")
+            train_manifest = self._read_manifest(stats_storage, "train")
             if train_manifest.get("split") != "train":
                 raise ValueError("Piper X normalization statistics must come from the training bucket")
         elif manifest.get("split") != "train":
             raise ValueError("Piper X training statistics require a train bucket")
         if self.action_mode == "eef":
-            absolute_action_stats, self._state_stats = _eef20_stats(str(stats_dir))
+            if str(stats_dir).startswith("tos://"):
+                absolute_action_stats, self._state_stats = _eef20_stats_from_storage(stats_storage)
+            else:
+                absolute_action_stats, self._state_stats = _eef20_stats(str(stats_dir))
         else:
-            absolute_action_stats = self._load_stats(stats_dir / "meta" / "action_eef_stats.json", ACTION_COLUMN, "action")
-            self._state_stats = self._load_stats(stats_dir / "meta" / "state_eef_stats.json", STATE_COLUMN, "state")
+            absolute_action_stats = self._load_stats_text(
+                stats_storage.text("meta/action_eef_stats.json"), ACTION_COLUMN, "action", f"{stats_dir}/meta/action_eef_stats.json"
+            )
+            self._state_stats = self._load_stats_text(
+                stats_storage.text("meta/state_eef_stats.json"), STATE_COLUMN, "state", f"{stats_dir}/meta/state_eef_stats.json"
+            )
         if self.relative_to_state:
+            if str(stats_dir).startswith("tos://"):
+                raise ValueError("relative EEF statistics require a local 1022-style training bucket")
             self._action_stats = _relative_action_stats(str(stats_dir), self.action_mode, self.window_stride)
         else:
             self._action_stats = absolute_action_stats
@@ -339,30 +478,29 @@ class PiperXDataset(BaseDataset):
         self.normalization_stats_path = None
 
     @staticmethod
-    def _read_manifest(bucket: Path, split: str) -> dict:
-        path = Path(bucket) / "manifest.json"
-        if not path.is_file():
-            raise FileNotFoundError(f"Piper X manifest is missing: {path}")
-        manifest = json.loads(path.read_text())
+    def _read_manifest(storage: DatasetStorage, split: str) -> dict:
+        label = f"{storage.root}/manifest.json"
+        try:
+            manifest = json.loads(storage.text("manifest.json"))
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(f"Piper X manifest is missing: {label}") from exc
         if manifest.get("format") != BUCKET_FORMAT:
-            raise ValueError(f"{path} format must be {BUCKET_FORMAT}")
+            raise ValueError(f"{label} format must be {BUCKET_FORMAT}")
         expected_split = "test" if split == "val" else split
         if manifest.get("split") != expected_split:
-            raise ValueError(f"{path} split is {manifest.get('split')!r}, expected {expected_split!r}")
+            raise ValueError(f"{label} split is {manifest.get('split')!r}, expected {expected_split!r}")
         for key, column in (("observation_state_eef", STATE_COLUMN), ("action_eef", ACTION_COLUMN)):
             contract = manifest.get(key, {})
             if (contract.get("column") != column or contract.get("shape") != [EEF_DIM]
                     or contract.get("quaternion_order") != "wxyz" or contract.get("reference") != "base_link"):
-                raise ValueError(f"{path} {key} must be 16D base_link wxyz EEF")
+                raise ValueError(f"{label} {key} must be 16D base_link wxyz EEF")
         return manifest
 
     @staticmethod
-    def _load_stats(path: Path, column: str, stream: str) -> dict:
-        if not path.is_file():
-            raise FileNotFoundError(f"Piper X statistics are missing: {path}")
-        payload = json.loads(path.read_text())
+    def _load_stats_text(text: str, column: str, stream: str, label: str) -> dict:
+        payload = json.loads(text)
         if payload.get("source_column") != column:
-            raise ValueError(f"{path} must describe {column}")
+            raise ValueError(f"{label} must describe {column}")
         block = payload[stream]["default"]
         stats = {
             key: np.asarray(block[f"global_{key}"], dtype=np.float32)
@@ -370,7 +508,7 @@ class PiperXDataset(BaseDataset):
         }
         for key, values in stats.items():
             if values.shape != (EEF_DIM,) or not np.isfinite(values).all():
-                raise ValueError(f"{path} statistic {key} must be {EEF_DIM} finite values")
+                raise ValueError(f"{label} statistic {key} must be {EEF_DIM} finite values")
         return stats
 
     def _raw_mask(self, dims) -> np.ndarray:
@@ -393,11 +531,15 @@ class PiperXDataset(BaseDataset):
     def __len__(self) -> int:
         return len(self._windows)
 
+    def _read_parquet(self, relative, columns):
+        with self._storage.open(str(relative)) as handle:
+            return pq.read_table(handle, columns=list(columns))
+
     @lru_cache(maxsize=128)
     def _read_table(self, local: int):
-        return pq.read_table(
+        return self._read_parquet(
             self._tables[local],
-            columns=[
+            [
                 STATE_COLUMN,
                 ACTION_COLUMN,
                 "observation.images.head",
@@ -407,12 +549,22 @@ class PiperXDataset(BaseDataset):
         )
 
     def _image(self, relative: str) -> Image.Image:
+        if self._remote:
+            with self._storage.open(relative) as handle:
+                with Image.open(handle) as image:
+                    return image.convert("RGB")
         with Image.open(self._source_root / relative) as image:
             return image.convert("RGB")
 
     def __getitem__(self, index: int) -> dict:
-        local, start = self._windows[index]
-        frames_idx = np.arange(start, start + self.num_frames, dtype=np.int64)
+        if self._kept is None:
+            local, start = self._windows[index]
+            frames_idx = np.arange(start, start + self.num_frames, dtype=np.int64)
+        else:
+            local, start_on_kept, offset = self._windows[index]
+            kept = self._kept[local][offset]
+            frames_idx = np.asarray(kept[start_on_kept:start_on_kept + self.num_frames], dtype=np.int64)
+            start = int(frames_idx[0])
         table = self._read_table(local).take(pa.array(frames_idx))
         state = np.asarray(table[STATE_COLUMN].to_pylist(), dtype=np.float32)
         action = np.asarray(table[ACTION_COLUMN].to_pylist(), dtype=np.float32)

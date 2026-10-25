@@ -35,6 +35,10 @@ VIDEO_STRIDE = 4
 VIDEO_INDICES = np.arange(0, NUM_FRAMES, VIDEO_STRIDE, dtype=np.int64)
 RAW_DIM_MASK = np.zeros(ACTION_DIM, dtype=bool)
 RAW_DIM_MASK[:22] = True  # base[22:24] are documented placeholders in Linglong.
+# Chassis lives in the 24D joint action. EEF training can append those two
+# values as raw action dims 16:18 without adding them to proprio.
+BASE_ACTION_SLICE = slice(22, 24)
+_STATS_KEYS = ("mean", "std", "min", "max", "q01", "q99")
 
 
 class LinglongDataset(BaseDataset):
@@ -91,6 +95,7 @@ class LinglongDataset(BaseDataset):
             demospeedup_gripper_radius=int(get_cfg(config, "demospeedup_gripper_radius", 3)),
             demospeedup_gripper_delta=float(get_cfg(config, "demospeedup_gripper_delta", 0.25)),
             demospeedup_smooth_width=int(get_cfg(config, "demospeedup_smooth_width", 9)),
+            supervise_base_action=bool(get_cfg(config, "supervise_base_action", False)),
         )
 
     def __init__(
@@ -129,6 +134,7 @@ class LinglongDataset(BaseDataset):
         demospeedup_gripper_radius: int = 3,
         demospeedup_gripper_delta: float = 0.25,
         demospeedup_smooth_width: int = 9,
+        supervise_base_action: bool = False,
     ):
         dataset_dir = str(dataset_dir)
         self._remote = dataset_dir.startswith("tos://")
@@ -149,11 +155,21 @@ class LinglongDataset(BaseDataset):
             raise ValueError("EEF state requires action_eef targets")
         if self.action_key == "action_eef" and self.state_key != "observation.state_eef":
             raise ValueError("Linglong EEF actions require observation.state_eef; joint-state/EEF-action experiments are retired")
+        self.supervise_base_action = bool(supervise_base_action)
+        if self.supervise_base_action and self.action_key != "action_eef":
+            raise ValueError("supervise_base_action keeps 16D EEF proprio and appends action[:, 22:24]")
+        if self.supervise_base_action:
+            self.raw_action_dim = 18
         self.raw_state_dim = 16 if self.state_key == "observation.state_eef" else STATE_DIM
+        default_action_count = 18 if self.supervise_base_action else (16 if self.action_key == "action_eef" else 22)
         self.raw_action_mask = self._raw_mask(
-            active_raw_action_dims, self.raw_action_dim,
-            16 if self.action_key == "action_eef" else 22,
+            active_raw_action_dims, self.raw_action_dim, default_action_count,
         )
+        if self.supervise_base_action and not bool(self.raw_action_mask[16:].all()):
+            raise ValueError(
+                "supervise_base_action requires chassis raw action dims 16 and 17 "
+                "in active_raw_action_dims"
+            )
         self.raw_state_mask = self._raw_mask(
             active_raw_state_dims, self.raw_state_dim, 16 if self.raw_state_dim == 16 else 22,
         )
@@ -332,6 +348,7 @@ class LinglongDataset(BaseDataset):
         stats = json.loads(stats_storage.text("meta/normalization_stats.json"))
         self._state_stats = {k: np.asarray(v, dtype=np.float32) for k, v in stats["state"].items() if k != "count"}
         self._action_stats = {k: np.asarray(v, dtype=np.float32) for k, v in stats["action"].items() if k != "count"}
+        joint_action_stats = self._action_stats
         if self.action_key == "action_eef":
             if json.loads(stats_storage.text("manifest.json")).get("split") != "train":
                 raise ValueError("EEF normalization statistics must come from the training bucket")
@@ -350,6 +367,8 @@ class LinglongDataset(BaseDataset):
                     k: np.asarray(state_eef_stats["state"]["default"][f"global_{k}"], dtype=np.float32)
                     for k in ("mean", "std", "min", "max", "q01", "q99")
                 }
+            if self.supervise_base_action:
+                self._action_stats = append_base_action_stats(self._action_stats, joint_action_stats)
         for label, values, dim in (("action", self._action_stats, self.raw_action_dim),
                                     ("state", self._state_stats, self.raw_state_dim)):
             for key in ("mean", "std", "min", "max", "q01", "q99"):
@@ -499,16 +518,18 @@ class LinglongDataset(BaseDataset):
     @lru_cache(maxsize=128)
     def _read_table(self, local: int):
         with self._storage.open(self._tables[local]) as handle:
-            return pq.read_table(
-                handle,
-                columns=[
-                    self.state_key,
-                    self.action_key,
-                    "observation.images.head",
-                    "observation.images.left",
-                    "observation.images.right",
-                ] + ([self._eef_valid_column] if self._eef_valid_column else []),
-            )
+            columns = [
+                self.state_key,
+                self.action_key,
+                "observation.images.head",
+                "observation.images.left",
+                "observation.images.right",
+            ]
+            if self.supervise_base_action:
+                columns.append("action")
+            if self._eef_valid_column:
+                columns.append(self._eef_valid_column)
+            return pq.read_table(handle, columns=columns)
 
     def _norm(self, values: np.ndarray, stats: dict) -> np.ndarray:
         return np.asarray(apply_normalization(values, stats, self.normalize_mode), dtype=np.float32)
@@ -534,6 +555,8 @@ class LinglongDataset(BaseDataset):
         table = self._read_table(local).take(pa.array(source_frames))
         state = np.asarray(table[self.state_key].to_pylist(), dtype=np.float32)
         action = np.asarray(table[self.action_key].to_pylist(), dtype=np.float32)
+        if self.supervise_base_action:
+            action = append_base_action(action, np.asarray(table["action"].to_pylist(), dtype=np.float32))
         if state.shape != (self.num_frames, self.raw_state_dim) or action.shape != (self.num_frames, self.raw_action_dim):
             raise ValueError(f"Linglong row shape mismatch: state={state.shape}, action={action.shape}")
         if not np.isfinite(state).all() or not np.isfinite(action).all():
@@ -604,9 +627,27 @@ class LinglongDataset(BaseDataset):
             "start_frame": int(start),
         }
 
-    @staticmethod
-    def _scatter_mask(dst_index: np.ndarray, raw_mask: np.ndarray) -> np.ndarray:
-        mask = np.zeros(UNIFY_DIM, dtype=bool)
-        mask[dst_index[raw_mask]] = True
-        return mask
+def append_base_action(action_eef: np.ndarray, joint_action: np.ndarray) -> np.ndarray:
+    """Append chassis action[:, 22:24] to a 16D EEF action. Proprio is unchanged."""
+    action_eef = np.asarray(action_eef, dtype=np.float32)
+    joint_action = np.asarray(joint_action, dtype=np.float32)
+    if action_eef.ndim != 2 or action_eef.shape[1] != 16:
+        raise ValueError(f"EEF action must be (T, 16), got {action_eef.shape}")
+    if joint_action.shape != (action_eef.shape[0], ACTION_DIM):
+        raise ValueError(f"joint action must be {(action_eef.shape[0], ACTION_DIM)}, got {joint_action.shape}")
+    return np.concatenate([action_eef, joint_action[:, BASE_ACTION_SLICE]], axis=1)
+
+
+def append_base_action_stats(eef_stats: dict, joint_action_stats: dict) -> dict:
+    """Extend 16D EEF action statistics with the 24D joint action's chassis dims."""
+    combined = {}
+    for key in _STATS_KEYS:
+        eef = np.asarray(eef_stats[key], dtype=np.float32)
+        joint = np.asarray(joint_action_stats[key], dtype=np.float32)
+        if eef.shape != (16,) or joint.shape != (ACTION_DIM,):
+            raise ValueError(f"Cannot append chassis {key} stats from shapes {eef.shape} and {joint.shape}")
+        combined[key] = np.concatenate([eef, joint[BASE_ACTION_SLICE]])
+    return combined
+
+
 __all__ = ["LinglongDataset"]

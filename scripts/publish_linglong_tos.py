@@ -15,7 +15,30 @@ import pyarrow.parquet as pq
 from openwam.dataloader.tos_cache import TosBackend, join_tos, parse_tos_uri
 
 
-def publish(source, destination, episodes=None, workers=8):
+def _same_size(backend, bucket, key, size):
+    """True when the object is already stored with this byte size."""
+    from tos.exceptions import TosServerError
+
+    try:
+        head = backend.client.head_object(bucket, key)
+    except TosServerError as exc:
+        if getattr(exc, "status_code", None) == 404:
+            return False
+        raise
+    return int(head.content_length) == int(size)
+
+
+def _upload_file(backend, destination, relative, path, resume):
+    uri = join_tos(destination, relative)
+    bucket, key = parse_tos_uri(uri)
+    size = path.stat().st_size
+    if resume and _same_size(backend, bucket, key, size):
+        return size
+    backend.client.put_object_from_file(bucket, key, str(path))
+    return size
+
+
+def publish(source, destination, episodes=None, workers=8, resume=False):
     source = Path(source).resolve()
     bucket, prefix = parse_tos_uri(destination)
     if not prefix:
@@ -42,10 +65,8 @@ def publish(source, destination, episodes=None, workers=8):
     def upload(item):
         rel, path = item
         # Validate object keys and prevent escaping through source image paths.
-        uri = join_tos(destination, rel)
-        b, key = parse_tos_uri(uri)
-        backend.client.put_object_from_file(b, key, str(path))
-        return path.stat().st_size
+        # put_object_from_file follows symlinks, so a merged bucket stays self-contained.
+        return _upload_file(backend, destination, rel, path, resume)
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         # Bound memory to one episode's image list; do not walk millions of files.
@@ -70,6 +91,14 @@ def publish(source, destination, episodes=None, workers=8):
         for size in pool.map(upload, metadata):
             total_files += 1
             total_bytes += size
+        sidecars = [
+            (p.name, p)
+            for p in sorted(source.iterdir())
+            if p.is_file() and p.suffix == ".json" and p.name != "manifest.json"
+        ]
+        for size in pool.map(upload, sidecars):
+            total_files += 1
+            total_bytes += size
     def put_text(relative, content):
         backend.client.put_object(bucket, prefix + "/" + relative, content=content.encode())
     put_text("meta/episodes.jsonl", "".join(json.dumps(x) + "\n" for x in rows))
@@ -89,11 +118,56 @@ def publish(source, destination, episodes=None, workers=8):
     return result
 
 
+def publish_tree(source, destination, workers=8, resume=False):
+    """Upload one directory tree. This is not an OpenWAM training bucket."""
+    source = Path(source).resolve()
+    bucket, prefix = parse_tos_uri(destination)
+    if not prefix:
+        raise ValueError("Use a dedicated versioned dataset prefix")
+    backend = TosBackend()
+    marker = prefix + "/publication.json"
+    listing = backend.client.list_objects_type2(bucket, prefix=marker, max_keys=1)
+    if any(x.key == marker for x in listing.contents):
+        raise ValueError("Destination tree is already published; choose a NEW immutable prefix")
+    files = [path for path in source.rglob("*") if path.is_file() and not path.is_symlink()]
+    # A symlink file is stored under its path inside this tree, using the target bytes.
+    files.extend(path for path in source.rglob("*") if path.is_symlink() and path.is_file())
+    total_files, total_bytes = 0, 0
+    started = time.monotonic()
+
+    def upload(path):
+        relative = path.relative_to(source).as_posix()
+        return _upload_file(backend, destination, relative, path, resume)
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for size in pool.map(upload, files):
+            total_files += 1
+            total_bytes += size
+            if total_files % 1000 == 0:
+                print(json.dumps({"files": total_files, "bytes": total_bytes}), flush=True)
+    record = {
+        "format": "directory_tree_v1",
+        "status": "complete",
+        "source": str(source),
+        "files": total_files,
+        "bytes": total_bytes,
+        "seconds": round(time.monotonic() - started, 3),
+    }
+    backend.client.put_object(bucket, marker, content=(json.dumps(record, indent=2) + "\n").encode())
+    print(json.dumps({"destination": destination, **record}), flush=True)
+    return record
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", required=True)
     parser.add_argument("--destination", required=True)
     parser.add_argument("--episodes", type=int, help="First N complete episodes for a smoke test; omit for full publication")
     parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--resume", action="store_true", help="Skip objects whose stored size already matches the local file")
+    parser.add_argument("--tree", action="store_true", help="Upload a raw directory. Does not write an OpenWAM manifest")
     args = parser.parse_args()
-    publish(args.source, args.destination, args.episodes, args.workers)
+    if args.tree:
+        publish_tree(args.source, args.destination, args.workers, args.resume)
+    else:
+        publish(args.source, args.destination, args.episodes, args.workers, args.resume)

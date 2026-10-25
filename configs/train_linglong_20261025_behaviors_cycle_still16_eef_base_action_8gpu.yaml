@@ -1,0 +1,15 @@
+# Same chassis-action supervision as the 64-still behaviors run.
+# Data is the local copy: one cycle prompt, 16 still frames.
+defaults:
+  - train_linglong_20261025_behaviors_eef_base_action_8gpu
+  - _self_
+
+dataloader:
+  dataset_dir: /vePFS/data/linglong/linglong_20261025_behaviors_cycle_still16_openwam/linglong_openwam_train_15hz
+  normalization_dataset_dir: /vePFS/data/linglong/linglong_20261025_behaviors_cycle_still16_openwam/linglong_openwam_train_15hz
+
+training:
+  output_path: /vePFS/zhuoyu/OpenWAM/outputs/linglong_20261025_behaviors_cycle_still16_eef_base_action_8gpu_e10
+
+project:
+  output_dir: /vePFS/zhuoyu/OpenWAM/outputs/linglong_20261025_behaviors_cycle_still16_eef_base_action_8gpu_e10/hydra

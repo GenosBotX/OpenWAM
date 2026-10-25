@@ -1,0 +1,194 @@
+[
+  {
+    "destination": "tos://ml-platform-auto-created-required-2109640594-cn-beijing/linglong/openwam/linglong/20261024_1023_train_v1",
+    "ok": true,
+    "checks": {
+      "status": true,
+      "split": true,
+      "episodes": true,
+      "frames": true,
+      "source_root": true,
+      "parquet_bytes": true,
+      "image_bytes": true,
+      "last_parquet_bytes": true
+    }
+  },
+  {
+    "destination": "tos://ml-platform-auto-created-required-2109640594-cn-beijing/linglong/openwam/linglong/20261024_1023_test_v1",
+    "ok": true,
+    "checks": {
+      "status": true,
+      "split": true,
+      "episodes": true,
+      "frames": true,
+      "source_root": true,
+      "parquet_bytes": true,
+      "image_bytes": true,
+      "last_parquet_bytes": true
+    }
+  },
+  {
+    "destination": "tos://ml-platform-auto-created-required-2109640594-cn-beijing/linglong/openwam/linglong/20261024_20261020_train_v1",
+    "ok": true,
+    "checks": {
+      "status": true,
+      "split": true,
+      "episodes": true,
+      "frames": true,
+      "source_root": true,
+      "parquet_bytes": true,
+      "image_bytes": true,
+      "last_parquet_bytes": true
+    }
+  },
+  {
+    "destination": "tos://ml-platform-auto-created-required-2109640594-cn-beijing/linglong/openwam/linglong/20261024_20261020_test_v1",
+    "ok": true,
+    "checks": {
+      "status": true,
+      "split": true,
+      "episodes": true,
+      "frames": true,
+      "source_root": true,
+      "parquet_bytes": true,
+      "image_bytes": true,
+      "last_parquet_bytes": true
+    }
+  },
+  {
+    "destination": "tos://ml-platform-auto-created-required-2109640594-cn-beijing/linglong/openwam/linglong/20261024_sheet_20261019_20261020_train_v1",
+    "ok": true,
+    "checks": {
+      "status": true,
+      "split": true,
+      "episodes": true,
+      "frames": true,
+      "source_root": true,
+      "parquet_bytes": true,
+      "image_bytes": true,
+      "last_parquet_bytes": true
+    }
+  },
+  {
+    "destination": "tos://ml-platform-auto-created-required-2109640594-cn-beijing/linglong/openwam/linglong/20261024_sheet_20261019_20261020_test_v1",
+    "ok": true,
+    "checks": {
+      "status": true,
+      "split": true,
+      "episodes": true,
+      "frames": true,
+      "source_root": true,
+      "parquet_bytes": true,
+      "image_bytes": true,
+      "last_parquet_bytes": true
+    }
+  },
+  {
+    "destination": "tos://ml-platform-auto-created-required-2109640594-cn-beijing/linglong/openwam/linglong/20261024_sheet_20261019_20261020_20261023_train_v1",
+    "ok": true,
+    "checks": {
+      "status": true,
+      "split": true,
+      "episodes": true,
+      "frames": true,
+      "source_root": true,
+      "parquet_bytes": true,
+      "image_bytes": true,
+      "last_parquet_bytes": true
+    }
+  },
+  {
+    "destination": "tos://ml-platform-auto-created-required-2109640594-cn-beijing/linglong/openwam/linglong/20261024_sheet_20261019_20261020_20261023_test_v1",
+    "ok": true,
+    "checks": {
+      "status": true,
+      "split": true,
+      "episodes": true,
+      "frames": true,
+      "source_root": true,
+      "parquet_bytes": true,
+      "image_bytes": true,
+      "last_parquet_bytes": true
+    }
+  },
+  {
+    "destination": "tos://ml-platform-auto-created-required-2109640594-cn-beijing/linglong/openwam/linglong/20261024_fittings_portable_train_v1",
+    "ok": true,
+    "checks": {
+      "status": true,
+      "split": true,
+      "episodes": true,
+      "frames": true,
+      "source_root": true,
+      "parquet_bytes": true,
+      "image_bytes": true,
+      "last_parquet_bytes": true
+    }
+  },
+  {
+    "destination": "tos://ml-platform-auto-created-required-2109640594-cn-beijing/linglong/openwam/linglong/20261024_fittings_portable_test_v1",
+    "ok": true,
+    "checks": {
+      "status": true,
+      "split": true,
+      "episodes": true,
+      "frames": true,
+      "source_root": true,
+      "parquet_bytes": true,
+      "image_bytes": true,
+      "last_parquet_bytes": true
+    }
+  },
+  {
+    "destination": "tos://ml-platform-auto-created-required-2109640594-cn-beijing/linglong/openwam/linglong/20261024_fittings_portable_allstuff_train_v1",
+    "ok": true,
+    "checks": {
+      "status": true,
+      "split": true,
+      "episodes": true,
+      "frames": true,
+      "source_root": true,
+      "parquet_bytes": true,
+      "image_bytes": true,
+      "last_parquet_bytes": true
+    }
+  },
+  {
+    "destination": "tos://ml-platform-auto-created-required-2109640594-cn-beijing/linglong/openwam/linglong/20261024_fittings_20261019_train_v1",
+    "ok": true,
+    "checks": {
+      "status": true,
+      "split": true,
+      "episodes": true,
+      "frames": true,
+      "source_root": true,
+      "parquet_bytes": true,
+      "image_bytes": true,
+      "last_parquet_bytes": true
+    }
+  },
+  {
+    "destination": "tos://ml-platform-auto-created-required-2109640594-cn-beijing/linglong/openwam/linglong/20261024_allstuff_20261019_20261020_train_v1",
+    "ok": true,
+    "checks": {
+      "status": true,
+      "split": true,
+      "episodes": true,
+      "frames": true,
+      "source_root": true,
+      "parquet_bytes": true,
+      "image_bytes": true,
+      "last_parquet_bytes": true
+    }
+  },
+  {
+    "destination": "tos://ml-platform-auto-created-required-2109640594-cn-beijing/linglong/openwam/linglong/20261024_20261019_processed_v1",
+    "ok": true,
+    "checks": {
+      "status": true,
+      "files": true,
+      "bytes": true,
+      "sample_bytes": true
+    }
+  }
+]

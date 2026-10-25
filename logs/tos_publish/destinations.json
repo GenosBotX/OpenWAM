@@ -1,0 +1,72 @@
+[
+  {
+    "kind": "bucket",
+    "source": "/vePFS/data/linglong/linglong_1023_openwam/linglong_openwam_train_15hz",
+    "destination": "tos://ml-platform-auto-created-required-2109640594-cn-beijing/linglong/openwam/linglong/20261024_1023_train_v1"
+  },
+  {
+    "kind": "bucket",
+    "source": "/vePFS/data/linglong/linglong_1023_openwam/linglong_openwam_test_15hz",
+    "destination": "tos://ml-platform-auto-created-required-2109640594-cn-beijing/linglong/openwam/linglong/20261024_1023_test_v1"
+  },
+  {
+    "kind": "bucket",
+    "source": "/vePFS/data/linglong/linglong_20261020_openwam/linglong_openwam_train_15hz",
+    "destination": "tos://ml-platform-auto-created-required-2109640594-cn-beijing/linglong/openwam/linglong/20261024_20261020_train_v1"
+  },
+  {
+    "kind": "bucket",
+    "source": "/vePFS/data/linglong/linglong_20261020_openwam/linglong_openwam_test_15hz",
+    "destination": "tos://ml-platform-auto-created-required-2109640594-cn-beijing/linglong/openwam/linglong/20261024_20261020_test_v1"
+  },
+  {
+    "kind": "bucket",
+    "source": "/vePFS/data/linglong/linglong_20261019_20261020_openwam/linglong_openwam_train_15hz",
+    "destination": "tos://ml-platform-auto-created-required-2109640594-cn-beijing/linglong/openwam/linglong/20261024_sheet_20261019_20261020_train_v1"
+  },
+  {
+    "kind": "bucket",
+    "source": "/vePFS/data/linglong/linglong_20261019_20261020_openwam/linglong_openwam_test_15hz",
+    "destination": "tos://ml-platform-auto-created-required-2109640594-cn-beijing/linglong/openwam/linglong/20261024_sheet_20261019_20261020_test_v1"
+  },
+  {
+    "kind": "bucket",
+    "source": "/vePFS/data/linglong/linglong_20261019_20261020_20261023_openwam/linglong_openwam_train_15hz",
+    "destination": "tos://ml-platform-auto-created-required-2109640594-cn-beijing/linglong/openwam/linglong/20261024_sheet_20261019_20261020_20261023_train_v1"
+  },
+  {
+    "kind": "bucket",
+    "source": "/vePFS/data/linglong/linglong_20261019_20261020_20261023_openwam/linglong_openwam_test_15hz",
+    "destination": "tos://ml-platform-auto-created-required-2109640594-cn-beijing/linglong/openwam/linglong/20261024_sheet_20261019_20261020_20261023_test_v1"
+  },
+  {
+    "kind": "bucket",
+    "source": "/vePFS/data/linglong/linglong_0923_1010_1012_1017_fittings_eef_gtstate_portable/data/linglong_0923_1010_1012_1017_fittings_eef_gtstate_train_15hz",
+    "destination": "tos://ml-platform-auto-created-required-2109640594-cn-beijing/linglong/openwam/linglong/20261024_fittings_portable_train_v1"
+  },
+  {
+    "kind": "bucket",
+    "source": "/vePFS/data/linglong/linglong_0923_1010_1012_1017_fittings_eef_gtstate_portable/data/linglong_0923_1010_1012_1017_fittings_eef_gtstate_test_15hz",
+    "destination": "tos://ml-platform-auto-created-required-2109640594-cn-beijing/linglong/openwam/linglong/20261024_fittings_portable_test_v1"
+  },
+  {
+    "kind": "bucket",
+    "source": "/vePFS/data/linglong/linglong_0923_1010_1012_1017_fittings_eef_gtstate_portable/data/linglong_0923_1010_1012_1017_fittings_eef_gtstate_allstuff_train_15hz",
+    "destination": "tos://ml-platform-auto-created-required-2109640594-cn-beijing/linglong/openwam/linglong/20261024_fittings_portable_allstuff_train_v1"
+  },
+  {
+    "kind": "bucket",
+    "source": "/vePFS/data/linglong/linglong_0923_1010_1012_1017_fittings_20261019_eef_gtstate_train_15hz",
+    "destination": "tos://ml-platform-auto-created-required-2109640594-cn-beijing/linglong/openwam/linglong/20261024_fittings_20261019_train_v1"
+  },
+  {
+    "kind": "bucket",
+    "source": "/vePFS/data/linglong/linglong_allstuff_20261019_20261020_eef_train_15hz",
+    "destination": "tos://ml-platform-auto-created-required-2109640594-cn-beijing/linglong/openwam/linglong/20261024_allstuff_20261019_20261020_train_v1"
+  },
+  {
+    "kind": "tree",
+    "source": "/vePFS/data/linglong/linglong_20261019_processed",
+    "destination": "tos://ml-platform-auto-created-required-2109640594-cn-beijing/linglong/openwam/linglong/20261024_20261019_processed_v1"
+  }
+]

@@ -132,7 +132,7 @@ def keep_indices(casual: np.ndarray, offset: int, r_precision: int, r_casual: in
     return np.asarray(kept, dtype=np.int64)
 
 
-def _load_episode_signal(episode: dict, table_path: Path, entropy_dir: Path) -> tuple[np.ndarray, np.ndarray]:
+def _load_episode_signal(episode: dict, table_path: Path, entropy_dir: Path, read_table=None) -> tuple[np.ndarray, np.ndarray]:
     episode_index = int(episode["episode_index"])
     length = int(episode["length"])
     path = entropy_dir / f"episode_{episode_index:06d}.npz"
@@ -142,7 +142,8 @@ def _load_episode_signal(episode: dict, table_path: Path, entropy_dir: Path) -> 
         entropy = expand_entropy(payload["frame_index"], payload["entropy"], length)
         if int(payload["episode_index"]) != episode_index:
             raise ValueError(f"{path} episode_index does not match the dataset row")
-    grip_table = pq.read_table(table_path, columns=["action_eef"])
+    reader = pq.read_table if read_table is None else read_table
+    grip_table = reader(table_path, columns=["action_eef"])
     grip = np.asarray(grip_table.column("action_eef").to_pylist(), dtype=np.float32)
     if grip.shape != (length, 16):
         raise ValueError(f"{table_path} action_eef shape {grip.shape} != ({length}, 16)")
@@ -161,6 +162,7 @@ def build_keep_plan(
     gripper_delta: float,
     smooth_width: int,
     min_frames: int,
+    read_table=None,
 ) -> KeepPlan:
     """Build one keep-table per phase for every episode."""
     if r_precision < 1 or r_casual < 1:
@@ -177,7 +179,7 @@ def build_keep_plan(
     smoothed = []
     grips = []
     for episode, table_path in zip(episodes, table_paths):
-        entropy, grip = _load_episode_signal(episode, table_path, entropy_dir)
+        entropy, grip = _load_episode_signal(episode, table_path, entropy_dir, read_table)
         smoothed.append(median_filter(entropy, smooth_width))
         grips.append(grip)
     threshold, low_center, high_center = two_means_threshold(np.concatenate(smoothed))

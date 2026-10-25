@@ -1,0 +1,32 @@
+TaskName: "openwam-piper-1022-rot6d-tos-demospeedup-8gpu-e10"
+Description: "20261022 Piper X TOS train prefix; 1022-only rot6d stats; DemoSpeedup r2/r3; 8 GPUs x batch 4 x accumulation 24; 10 epochs from Piper-X step 30000"
+Tags:
+  - "openwam"
+  - "piper-x"
+  - "demospeedup"
+  - "1022"
+UserCodePath: ""
+RemoteMountCodePath: ""
+Entrypoint: >-
+  cd /vePFS/zhuoyu/OpenWAM &&
+  exec bash scripts_piper/launch_volcano_piper_x_20261022_ax_only_full_eef_8gpu_e10_piperx_pretrain_rot6d_tos_demospeedup.sh
+ImageUrl: "vemlp-cn-beijing.cr.volces.com/preset-images/pytorch:2.12.0-cu13.0.3-py3.11-ubuntu24.04"
+ResourceQueueID: "q-20261015220733-5tvxl"
+Framework: "PyTorchDDP"
+TaskRoleSpecs:
+  - RoleName: "worker"
+    RoleReplicas: 1
+    Flavor: "custom"
+    ResourceSpec:
+      Family: "ml.hpcpni2l"
+      CPU: 105.000
+      Memory: 1875.000
+      GPUNum: 8
+Storages:
+  - Type: "Vepfs"
+    MountPath: "/vePFS"
+    VepfsId: "vepfs-cnbj794253825761"
+ActiveDeadlineSeconds: "48h"
+DelayExitTimeSeconds: "30m"
+AccessType: "Private"
+Priority: 4

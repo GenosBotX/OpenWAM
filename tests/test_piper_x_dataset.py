@@ -186,6 +186,81 @@ def test_rejects_a_non_piper_bucket(tmp_path):
         raise AssertionError("a Linglong bucket must not open as Piper X")
 
 
+def test_demospeedup_keeps_training_windows_and_leaves_test_contiguous(tmp_path):
+    train, test = _buckets(tmp_path)
+    episode = json.loads((train / "meta" / "episodes.jsonl").read_text().splitlines()[0])
+    length = int(episode["length"])
+    entropy = tmp_path / "entropy"
+    entropy.mkdir()
+    frames = np.arange(0, length, 2, dtype=np.int64)
+    np.savez(
+        entropy / "episode_000000.npz",
+        frame_index=frames,
+        entropy=np.zeros(frames.shape, dtype=np.float32),
+        episode_index=np.int64(0),
+    )
+    dataset = PiperXDataset(
+        str(train),
+        split="train",
+        demospeedup_enabled=True,
+        demospeedup_entropy_dir=str(entropy),
+        demospeedup_r_precision=1,
+        demospeedup_r_casual=1,
+        demospeedup_num_offsets=1,
+    )
+    assert dataset.demospeedup_summary["windows"] == len(dataset) == 1
+    item = dataset[0]
+    assert item["action"].shape == (32, 80)
+    assert item["start_frame"] == 0
+    evaluation = PiperXDataset(
+        str(test),
+        split="test",
+        normalization_dataset_dir=str(train),
+        demospeedup_enabled=True,
+        demospeedup_entropy_dir=str(entropy),
+    )
+    assert evaluation.demospeedup_summary is None
+    assert len(evaluation) == 1
+
+
+def test_tos_demospeedup_config_uses_1022_train_and_piperx_init():
+    config_dir = str(Path(__file__).resolve().parents[1] / "configs")
+    with initialize_config_dir(config_dir=config_dir, version_base=None):
+        cfg = compose(config_name="train_piper_x_20261022_ax_only_full_eef_8gpu_e10_piperx_pretrain_rot6d_tos_demospeedup")
+    assert cfg.dataloader.action_mode == "eef"
+    assert str(cfg.dataloader.dataset_dir).startswith("tos://")
+    assert str(cfg.dataloader.dataset_dir).endswith("/20261022_eef_v1/train")
+    assert str(cfg.dataloader.normalization_dataset_dir) == str(cfg.dataloader.dataset_dir)
+    assert str(cfg.dataloader.eval_dataset_dir).endswith("/20261022_eef_v1/test")
+    assert cfg.dataloader.demospeedup_enabled is True
+    assert cfg.dataloader.demospeedup_r_precision == 2
+    assert cfg.dataloader.demospeedup_r_casual == 3
+    assert str(cfg.training.finetune_ckpt_path).endswith("checkpoint_step_30000.safetensors")
+    assert cfg.training.resume_ckpt_path is None
+    assert cfg.training.num_epochs == 10
+    assert cfg.training.batch_size == 4
+
+
+def test_from_config_keeps_tos_scheme(monkeypatch):
+    seen = {}
+
+    def remember(self, dataset_dir, **kwargs):
+        seen["dataset_dir"] = dataset_dir
+        seen["normalization"] = kwargs["normalization_dataset_dir"]
+
+    monkeypatch.setattr(PiperXDataset, "__init__", remember)
+    cfg = OmegaConf.create({
+        "dataset_dir": "tos://bucket/piper/train",
+        "normalization_dataset_dir": "tos://bucket/piper/train",
+        "eval_dataset_dir": "tos://bucket/piper/test",
+    })
+    PiperXDataset.from_config(cfg, split="train")
+    assert seen["dataset_dir"] == "tos://bucket/piper/train"
+    assert seen["normalization"] == "tos://bucket/piper/train"
+    PiperXDataset.from_config(cfg, split="test")
+    assert seen["dataset_dir"] == "tos://bucket/piper/test"
+
+
 def test_train_config_selects_piper_dataset():
     config_dir = str(Path(__file__).resolve().parents[1] / "configs")
     with initialize_config_dir(config_dir=config_dir, version_base=None):

@@ -1,0 +1,30 @@
+# 1022 Piper X on TOS, online DemoSpeedup, official rot6d layout.
+# Statistics are computed from this 1022 train prefix only.
+# Initialization stays the RoboDojo Piper-X step-30000 checkpoint.
+defaults:
+  - train_piper_x_20261022_ax_only_full_eef_8gpu_e10_piperx_pretrain_rot6d
+  - _self_
+
+dataloader:
+  dataset_dir: "tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261022_eef_v1/train"
+  normalization_dataset_dir: "tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261022_eef_v1/train"
+  eval_dataset_dir: "tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261022_eef_v1/test"
+  cache_dir: /tmp/openwam-tos-cache
+  cache_max_bytes: 4294967296
+  cache_min_free_bytes: 1073741824
+  demospeedup_enabled: true
+  demospeedup_entropy_dir: /vePFS/zhuoyu/OpenWAM/outputs/action_entropy_piper_x_20261022_ax_only_full_step18560_stride2
+  demospeedup_r_precision: 2
+  demospeedup_r_casual: 3
+  demospeedup_num_offsets: null
+  demospeedup_gripper_radius: 3
+  demospeedup_gripper_delta: 0.25
+  demospeedup_smooth_width: 9
+
+training:
+  resume_ckpt_path: null
+  finetune_ckpt_path: /vePFS/data/openwam/OpenWAM-Alpha-Real-RoboDojo-Piper-X/checkpoint_step_30000.safetensors
+  output_path: /vePFS/zhuoyu/OpenWAM/outputs/piper_x_20261022_ax_only_full_eef_8gpu_e10_piperx_pretrain_rot6d_tos_demospeedup
+
+project:
+  output_dir: /vePFS/zhuoyu/OpenWAM/outputs/piper_x_20261022_ax_only_full_eef_8gpu_e10_piperx_pretrain_rot6d_tos_demospeedup/hydra

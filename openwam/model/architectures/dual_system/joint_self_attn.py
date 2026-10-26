@@ -20,7 +20,7 @@ from torch import Tensor
 
 from openwam.model.action_backbone.separate_action_dit import ActionDiT
 from openwam.model.architectures.base import BaseWAMArchitecture
-from openwam.model.architectures.dual_system.cuda_graph_loop import CudaGraphMoTLoop
+from openwam.model.architectures.dual_system.cuda_graph_loop import CudaGraphDenoiseStep, CudaGraphMoTLoop
 from openwam.model.architectures.dual_system.mot_driver import DualSystemMoTDriver
 from openwam.model.architectures.registry import register_architecture
 from openwam.model.architectures.utils.common import resolve_bridge_layers
@@ -54,6 +54,7 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
         self._compiled_mot_run_joint_loop: Optional[Callable[..., Tuple[object, object]]] = None
         self._compiled_request_context_kv = None
         self._cuda_graph_mot_run_joint_loop: Optional[CudaGraphMoTLoop] = None
+        self._cuda_graph_denoise_step: Optional[CudaGraphDenoiseStep] = None
         if cfg is None:
             return
         if self.video_backbone is not None:
@@ -143,9 +144,15 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
         self._compiled_mot_run_joint_loop = None
         self._compiled_request_context_kv = None
         self._cuda_graph_mot_run_joint_loop = None
+        self._cuda_graph_denoise_step = None
         section = self_attn_compile_cfg(compile_cfg)
         cuda_graph_cfg = cfg_get(section, "cuda_graph", None)
+        # Keep existing configs on the proven MoT-loop boundary unless they
+        # explicitly opt into the wider single-step capture.
+        graph_scope = str(cfg_get(cuda_graph_cfg, "scope", "mot_loop"))
         if as_bool(cfg_get(cuda_graph_cfg, "enabled", False), default=False):
+            if graph_scope not in {"mot_loop", "full_step"}:
+                raise ValueError(f"Unknown CUDA Graph scope: {graph_scope}")
             if as_bool(cfg_get(section, "dynamic", False), default=False):
                 raise ValueError("CUDA Graph MoT requires self_attn.dynamic=false")
             if not section_enabled(section, default=True):
@@ -156,6 +163,8 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
             self._cuda_graph_mot_run_joint_loop = CudaGraphMoTLoop(driver.run_joint_loop)
             logger.info("Enabled fixed-shape CUDA Graph replay for the dual self-attn MoT loop")
         if not compile_enabled(compile_cfg, default=False, strict=True):
+            if self._cuda_graph_mot_run_joint_loop is not None and graph_scope == "full_step":
+                self._cuda_graph_denoise_step = CudaGraphDenoiseStep(self._run_denoise_step)
             return
 
         if not section_enabled(section, default=True):
@@ -198,6 +207,9 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
             return
         if self._cuda_graph_mot_run_joint_loop is not None:
             self._cuda_graph_mot_run_joint_loop = CudaGraphMoTLoop(self._compiled_mot_run_joint_loop)
+            if graph_scope == "full_step":
+                self._cuda_graph_denoise_step = CudaGraphDenoiseStep(self._run_denoise_step)
+                logger.info("CUDA Graph captures input preparation, compiled MoT, and prediction heads")
         logger.info("Enabled dual self-attn MoT compile with torch.compile kwargs=%s", kwargs)
 
     def _prepare_request_context_kv(self, video_context, action_context):
@@ -274,7 +286,64 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
         pipeline_inputs["_request_action_context_kv"] = action_context_kv
         return pipeline_inputs
 
+    def _run_denoise_step(self, step_inputs, request_inputs):
+        return self._forward_impl(
+            step_inputs["noisy_actions"],
+            step_inputs["action_timestep"],
+            latents=step_inputs["latents"],
+            timestep=step_inputs["timestep"],
+            **request_inputs,
+        )
+
     def forward(
+        self,
+        noisy_actions: Optional[Tensor],
+        action_timestep: Optional[Tensor],
+        *,
+        proprio: Optional[Tensor] = None,
+        use_gradient_checkpointing: bool = False,
+        use_gradient_checkpointing_offload: bool = False,
+        **pipeline_inputs,
+    ) -> Tuple[Tensor, Optional[Tensor]]:
+        graph = getattr(self, "_cuda_graph_denoise_step", None)
+        if graph is not None:
+            if self.training or use_gradient_checkpointing or use_gradient_checkpointing_offload:
+                raise RuntimeError("CUDA Graph full step requires eval mode without gradient checkpointing")
+            if noisy_actions is None or self.action_backbone is None:
+                raise RuntimeError("CUDA Graph full step requires joint video/action inference")
+            # Wan's plain complex RoPE tensors are not module buffers and may
+            # still be on CPU after model.to(). A blocking H2D copy in prepare
+            # is illegal during capture. Move the existing values, never cast
+            # them or regenerate frequencies with different rounding.
+            from openwam.model.video_backbone.wan_backbone import WanBase
+
+            if not isinstance(self.video_backbone, WanBase):
+                raise RuntimeError("CUDA Graph full step currently supports Wan backbones only")
+            dit = self.video_backbone.dit
+            if any(freq.device != noisy_actions.device for freq in dit.freqs):
+                dit.freqs = tuple(freq.to(device=noisy_actions.device) for freq in dit.freqs)
+            ab = self.action_backbone
+            if ab.freqs.device != noisy_actions.device:
+                ab.freqs = ab.freqs.to(device=noisy_actions.device)
+            request_inputs = dict(pipeline_inputs)
+            step_inputs = {
+                "noisy_actions": noisy_actions,
+                "action_timestep": action_timestep,
+                "latents": request_inputs.pop("latents"),
+                "timestep": request_inputs.pop("timestep"),
+            }
+            request_inputs["proprio"] = proprio
+            return graph(step_inputs, request_inputs)
+        return self._forward_impl(
+            noisy_actions,
+            action_timestep,
+            proprio=proprio,
+            use_gradient_checkpointing=use_gradient_checkpointing,
+            use_gradient_checkpointing_offload=use_gradient_checkpointing_offload,
+            **pipeline_inputs,
+        )
+
+    def _forward_impl(
         self,
         noisy_actions: Optional[Tensor],
         action_timestep: Optional[Tensor],
@@ -345,6 +414,8 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
         )
         compiled_loop = getattr(self, "_compiled_mot_run_joint_loop", None)
         cuda_graph_loop = getattr(self, "_cuda_graph_mot_run_joint_loop", None)
+        if getattr(self, "_cuda_graph_denoise_step", None) is not None:
+            cuda_graph_loop = None  # The outer graph owns capture; never nest graphs.
         if cuda_graph_loop is not None and (
             self.training or use_gradient_checkpointing or use_gradient_checkpointing_offload
         ):
@@ -358,6 +429,8 @@ class DualSystemSelfAttnArchitecture(BaseWAMArchitecture):
             try:
                 vstate, astate = compiled_loop(vstate, astate)
             except Exception as exc:
+                if getattr(self, "_cuda_graph_denoise_step", None) is not None:
+                    raise RuntimeError("Compiled MoT failed inside full-step CUDA Graph") from exc
                 self._compiled_mot_run_joint_loop = None
                 logger.warning("dual self-attn compiled MoT loop failed; falling back to eager: %s", exc)
                 vstate, astate = driver.run_joint_loop(

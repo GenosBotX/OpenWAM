@@ -221,4 +221,65 @@ class CudaGraphMoTLoop:
         )
 
 
-__all__ = ["CudaGraphMoTLoop"]
+class CudaGraphDenoiseStep:
+    """Capture raw latents/timesteps through final video/action predictions.
+
+    Request tensors (including K/V) must be immutable until the request ends.
+    New tensor identities refresh the request buffers. Only four step inputs
+    are copied on subsequent calls. Predictions alias graph-owned buffers;
+    consumers retaining them across replays must clone them (as DiT cache does).
+    Scheduler updates and cache decisions remain outside this graph.
+    """
+
+    def __init__(self, step):
+        self.step = step
+        self._entries = {}
+
+    def __call__(self, step_inputs, request_inputs):
+        if torch.is_grad_enabled():
+            raise RuntimeError("CUDA Graph full step only supports inference with gradients disabled")
+        signature = _signature((step_inputs, request_inputs))
+        entry = self._entries.get(signature)
+        if entry is None:
+            entry = self._capture(step_inputs, request_inputs)
+        static_step, static_request, graph, predictions, request_refs = entry
+        current_request = tuple(_tensor_leaves(request_inputs))
+        if not _same_tensor_refs(request_refs, current_request):
+            _copy_inputs(request_inputs, static_request)
+            request_refs = _weak_tensor_refs(current_request)
+        _copy_inputs(step_inputs, static_step)
+        self._entries[signature] = (static_step, static_request, graph, predictions, request_refs)
+        graph.replay()
+        return predictions
+
+    def _capture(self, step_inputs, request_inputs):
+        tensors = tuple(_tensor_leaves((step_inputs, request_inputs)))
+        if not tensors or any(not t.is_cuda for t in tensors):
+            raise RuntimeError("CUDA Graph full step requires CUDA input tensors")
+        devices = {t.device for t in tensors}
+        if len(devices) != 1:
+            raise RuntimeError("CUDA Graph full step requires one CUDA device")
+        static_step, static_request = _map_tree((step_inputs, request_inputs), clone_tensors=True)
+        device = tensors[0].device
+        stream = torch.cuda.Stream(device=device)
+        stream.wait_stream(torch.cuda.current_stream(device))
+        with torch.cuda.stream(stream), torch.no_grad():
+            self.step(static_step, static_request)
+        torch.cuda.current_stream(device).wait_stream(stream)
+        # Warm-up may lazily build shape-specific caches; capture only after it.
+        graph = torch.cuda.CUDAGraph()
+        try:
+            with torch.cuda.graph(graph), torch.no_grad():
+                predictions = self.step(static_step, static_request)
+        except Exception as exc:
+            raise RuntimeError("CUDA Graph full-step capture failed") from exc
+        return (
+            static_step,
+            static_request,
+            graph,
+            predictions,
+            _weak_tensor_refs(tuple(_tensor_leaves(request_inputs))),
+        )
+
+
+__all__ = ["CudaGraphMoTLoop", "CudaGraphDenoiseStep"]

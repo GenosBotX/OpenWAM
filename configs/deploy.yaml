@@ -38,6 +38,7 @@ optimization:
       dynamic: false           # Fixed-shape MoT-loop compile for dual_system_self_attn
       cuda_graph:
         enabled: false          # Explicitly capture and replay the fixed-shape MoT loop
+        scope: mot_loop         # mot_loop | full_step (input/timestep preparation through prediction heads)
     cross_attn:
       torch_mode: default
       dynamic: false           # Action-side fast path for dual_system_cross_attn

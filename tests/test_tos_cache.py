@@ -1,10 +1,14 @@
 import multiprocessing as mp
+import errno
+import os
 from pathlib import Path
 import time
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
-from openwam.dataloader.tos_cache import BoundedTosCache, CacheFullError, join_tos
+from openwam.dataloader.tos_cache import BoundedTosCache, CacheFullError, TosBackend, join_tos
 
 
 class FilesBackend:
@@ -172,3 +176,106 @@ def test_live_connection_is_not_reused_by_child(tmp_path, method):
     assert queue.get(timeout=5) == (None, 4)
     assert_usage_matches_entries(cache)
     assert cache.stats()["hits"] == 1
+
+
+def streaming_result(chunks, size=4):
+    # Match the SDK's nested CRC adapter -> Response -> requests.Response.
+    response = Mock()
+    return SimpleNamespace(
+        content_length=size, read=Mock(side_effect=chunks),
+        content=SimpleNamespace(data=SimpleNamespace(resp=response)),
+    ), response
+
+
+def stub_tos_backend(monkeypatch, outcomes):
+    backend = TosBackend()
+    backend._pid = os.getpid()
+    backend._client = Mock()
+    backend._client.get_object.side_effect = outcomes
+    backend._client.head_object.return_value = SimpleNamespace(content_length=4, etag="immutable")
+    pause = Mock()
+    monkeypatch.setattr("openwam.dataloader.tos_cache.time.sleep", pause)
+    return backend, pause
+
+
+@pytest.mark.parametrize("failure", ["timeout", "short_body"])
+def test_stream_retry_restarts_object_and_keeps_etag(tmp_path, monkeypatch, failure):
+    from requests.exceptions import ConnectionError
+
+    broken, broken_response = streaming_result([
+        b"xyz", ConnectionError("read timed out") if failure == "timeout" else b"",
+    ])
+    good, good_response = streaming_result([b"ab", b"cd", b""])
+    backend, pause = stub_tos_backend(monkeypatch, [broken, good])
+    cache = BoundedTosCache(tmp_path / "cache", 8, 0, backend)
+    with cache.open("tos://bucket/a") as handle:
+        assert handle.read() == b"abcd"
+    assert backend.client.get_object.call_count == 2
+    for call in backend.client.get_object.call_args_list:
+        assert call.args == ("bucket", "a")
+        assert call.kwargs == {"if_match": "immutable"}
+    broken_response.close.assert_called_once()
+    good_response.close.assert_called_once()
+    pause.assert_called_once()
+    assert cache.stats()["reserved_bytes"] == 4
+    assert cache.stats()["inflight_bytes"] == 0
+    assert not list(cache.root.glob("*.part"))
+
+
+def test_stream_retry_exhaustion_cleans_cache(tmp_path, monkeypatch):
+    from requests.exceptions import ConnectionError
+
+    results = [streaming_result([b"xy", ConnectionError("read timed out")]) for _ in range(4)]
+    backend, pause = stub_tos_backend(monkeypatch, [item[0] for item in results])
+    cache = BoundedTosCache(tmp_path / "cache", 8, 0, backend)
+    with pytest.raises(ConnectionError):
+        with cache.open("tos://bucket/a"):
+            pass
+    assert backend.client.get_object.call_count == 4
+    assert pause.call_count == 3
+    for _, response in results:
+        response.close.assert_called_once()
+    assert cache.stats()["reserved_bytes"] == 0
+    assert cache.stats()["inflight_bytes"] == 0
+    assert cache.stats()["errors"] == 1
+    assert not list(cache.root.glob("*.part"))
+    assert not list(cache.root.glob("*.data"))
+
+
+@pytest.mark.parametrize("status", [403, 404, 412, 429, 503])
+def test_http_errors_retry_only_transient_status(tmp_path, monkeypatch, status):
+    from tos.exceptions import TosServerError
+
+    error = TosServerError(
+        SimpleNamespace(request_id="test", headers={}, status=status),
+        "test error", "test", "test", "test",
+    )
+    good, response = streaming_result([b"abcd", b""])
+    backend, pause = stub_tos_backend(monkeypatch, [error, good])
+    destination = tmp_path / "object.part"
+    if status in (429, 503):
+        backend.download("tos://bucket/a", destination, "immutable")
+        assert destination.read_bytes() == b"abcd"
+        assert backend.client.get_object.call_count == 2
+        pause.assert_called_once()
+        response.close.assert_called_once()
+    else:
+        with pytest.raises(TosServerError):
+            backend.download("tos://bucket/a", destination, "immutable")
+        assert backend.client.get_object.call_count == 1
+        pause.assert_not_called()
+
+
+def test_local_disk_full_does_not_retry(tmp_path, monkeypatch):
+    import builtins
+
+    good, response = streaming_result([b"abcd", b""])
+    backend, pause = stub_tos_backend(monkeypatch, [good])
+    with monkeypatch.context() as patch:
+        patch.setattr(builtins, "open", Mock(side_effect=OSError(errno.ENOSPC, "disk full")))
+        with pytest.raises(OSError) as caught:
+            backend.download("tos://bucket/a", tmp_path / "object.part", "immutable")
+    assert caught.value.errno == errno.ENOSPC
+    assert backend.client.get_object.call_count == 1
+    pause.assert_not_called()
+    response.close.assert_called_once()

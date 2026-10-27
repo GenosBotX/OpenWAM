@@ -14,6 +14,7 @@ import json
 import logging
 import os
 from pathlib import Path, PurePosixPath
+import random
 import shutil
 import sqlite3
 import time
@@ -41,6 +42,8 @@ def join_tos(root, relative):
 class TosBackend:
     """Lazily create one SDK client per process, including forked workers."""
 
+    DOWNLOAD_ATTEMPTS = 4
+
     def __init__(self):
         self._pid = None
         self._client = None
@@ -59,6 +62,7 @@ class TosBackend:
                 os.environ.get("TOS_ENDPOINT", "tos-cn-beijing.volces.com"),
                 os.environ.get("TOS_REGION", "cn-beijing"),
                 security_token=os.environ.get("TOS_SECURITY_TOKEN"),
+                socket_timeout=60,
             )
             self._pid = os.getpid()
         return self._client
@@ -70,27 +74,71 @@ class TosBackend:
 
     def download(self, uri, destination, etag):
         bucket, key = parse_tos_uri(uri)
-        result = self.client.get_object(bucket, key, if_match=etag)
-        try:
-            with open(destination, "wb") as out:
-                while True:
-                    chunk = result.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    out.write(chunk)
-        finally:
-            stream = result.content
-            # SDK CRC adapters wrap Response in .data; Response wraps requests
-            # in .resp. Close it on both success and partial-download failure.
-            for _ in range(8):
-                close = getattr(stream, "close", None)
-                if close is not None:
+        # SDK request retries end when streaming response headers arrive. A body
+        # read can still time out, so retry the entire object with the same ETag.
+        for attempt in range(self.DOWNLOAD_ATTEMPTS):
+            result = None
+            try:
+                try:
+                    result = self.client.get_object(bucket, key, if_match=etag)
+                    with open(destination, "wb") as out:
+                        received = 0
+                        while True:
+                            chunk = result.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            out.write(chunk)
+                            received += len(chunk)
+                    if received != int(result.content_length):
+                        raise _IncompleteTosDownload("Incomplete TOS response body")
+                finally:
+                    if result is not None:
+                        self._close_response(result)
+                return
+            except Exception as exc:
+                Path(destination).unlink(missing_ok=True)
+                if attempt + 1 == self.DOWNLOAD_ATTEMPTS or not self._retryable(exc):
+                    raise
+                delay = 2**attempt + random.uniform(0, 0.5)
+                logging.getLogger(__name__).warning(
+                    "TOS download interrupted (%s); retry %d/%d in %.1fs",
+                    type(exc).__name__, attempt + 2, self.DOWNLOAD_ATTEMPTS, delay,
+                )
+                time.sleep(delay)
+
+    @staticmethod
+    def _retryable(exc):
+        from requests.exceptions import ChunkedEncodingError, ConnectionError, Timeout
+        from tos.exceptions import TosClientError, TosServerError
+
+        if isinstance(exc, TosServerError):
+            return exc.status_code in (408, 429, 500, 502, 503, 504)
+        if isinstance(exc, TosClientError):
+            exc = exc.cause
+        return isinstance(exc, (
+            ConnectionError, Timeout, ChunkedEncodingError,
+            TimeoutError, ConnectionResetError, _IncompleteTosDownload,
+        ))
+
+    @staticmethod
+    def _close_response(result):
+        stream = result.content
+        # SDK CRC adapters wrap Response in .data; Response wraps requests in
+        # .resp. A close failure must not mask the original download exception.
+        for _ in range(8):
+            close = getattr(stream, "close", None)
+            if close is not None:
+                with contextlib.suppress(Exception):
                     close()
-                    break
-                nested = getattr(stream, "data", getattr(stream, "resp", None))
-                if nested is None:
-                    break
-                stream = nested
+                break
+            nested = getattr(stream, "data", getattr(stream, "resp", None))
+            if nested is None:
+                break
+            stream = nested
+
+
+class _IncompleteTosDownload(IOError):
+    pass
 
 
 class CacheFullError(RuntimeError):

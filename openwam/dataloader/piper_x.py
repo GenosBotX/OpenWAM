@@ -257,6 +257,7 @@ class PiperXDataset(BaseDataset):
                 raise FileNotFoundError(f"Piper X images are missing under {self._source_root}")
         self._images = DatasetStorage(self._source_root, self.tos_cache)
         self._prompt = str(manifest["prompt"])
+        self.static_hold = bool(manifest.get("static_hold", False))
         self._episodes = [json.loads(line) for line in self._storage.text("meta/episodes.jsonl").splitlines() if line.strip()]
         self._tables = [f"data/chunk-{index // 1000:03d}/episode_{index:06d}.parquet" for index in range(len(self._episodes))]
 
@@ -292,8 +293,9 @@ class PiperXDataset(BaseDataset):
             self._state_dim = self.raw_dim
 
         self._windows = []
+        window_extent = 1 if self.static_hold else self.num_frames
         for local, episode in enumerate(self._episodes):
-            max_start = int(episode["length"]) - self.num_frames
+            max_start = int(episode["length"]) - window_extent
             if max_start >= 0:
                 self._windows.extend((local, start) for start in range(0, max_start + 1, self.window_stride))
         if not self._windows:
@@ -405,10 +407,23 @@ class PiperXDataset(BaseDataset):
 
     def __getitem__(self, index: int) -> dict:
         local, start = self._windows[index]
-        frames_idx = np.arange(start, start + self.num_frames, dtype=np.int64)
-        table = self._read_table(local).take(pa.array(frames_idx))
-        state = np.asarray(table[STATE_COLUMN].to_pylist(), dtype=np.float32)
-        action = np.asarray(table[ACTION_COLUMN].to_pylist(), dtype=np.float32)
+        if self.static_hold:
+            table = self._read_table(local).slice(start, 1)
+            observed_state = np.asarray(table[STATE_COLUMN].to_pylist(), dtype=np.float32)
+            recorded_action = np.asarray(table[ACTION_COLUMN].to_pylist(), dtype=np.float32)
+            if observed_state.shape != (1, EEF_DIM) or recorded_action.shape != (1, EEF_DIM):
+                raise ValueError(f"Piper X static row shape mismatch: state={observed_state.shape}, action={recorded_action.shape}")
+            if not np.array_equal(observed_state, recorded_action):
+                raise ValueError("static_hold bucket must store action_eef identical to observation.state_eef")
+            state = np.repeat(observed_state, self.num_frames, axis=0)
+            action = np.repeat(observed_state, self.num_frames, axis=0)
+            video_indices = (0,)
+        else:
+            frames_idx = np.arange(start, start + self.num_frames, dtype=np.int64)
+            table = self._read_table(local).take(pa.array(frames_idx))
+            state = np.asarray(table[STATE_COLUMN].to_pylist(), dtype=np.float32)
+            action = np.asarray(table[ACTION_COLUMN].to_pylist(), dtype=np.float32)
+            video_indices = VIDEO_INDICES
         if state.shape != (self.num_frames, EEF_DIM) or action.shape != (self.num_frames, EEF_DIM):
             raise ValueError(f"Piper X row shape mismatch: state={state.shape}, action={action.shape}")
         if not np.isfinite(state).all() or not np.isfinite(action).all():
@@ -423,7 +438,7 @@ class PiperXDataset(BaseDataset):
             action = _pack_eef20(action)
 
         images = []
-        for frame in VIDEO_INDICES:
+        for frame in video_indices:
             cameras = {
                 "head": self._image(table["observation.images.head"][int(frame)].as_py()),
                 "left": self._image(table["observation.images.left"][int(frame)].as_py()),
@@ -433,6 +448,8 @@ class PiperXDataset(BaseDataset):
                 images.append(assemble_multiview_layout(cameras, self.camera_layout, self.height, self.width))
             else:
                 images.append(cameras["head"].resize((self.width, self.height), Image.BILINEAR))
+        if self.static_hold:
+            images = [images[0].copy() for _ in VIDEO_INDICES]
 
         raw_action = np.asarray(apply_normalization(action[:self.num_frames - 1], self._action_stats, self.normalize_mode), dtype=np.float32)
         raw_state = np.asarray(apply_normalization(state[:1], self._state_stats, self.normalize_mode), dtype=np.float32)

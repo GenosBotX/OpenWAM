@@ -1,0 +1,28 @@
+# Piper-X 全量 TOS 数据：抓取序列与逐帧静止样本，共享训练集归一化。
+defaults:
+  - train_piper_x_20261022_20261023_tos_eef_8gpu_e10
+  - _self_
+
+dataloader:
+  height: 384
+  width: 320
+  dataset_dir:
+    - tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261022_eef_v1/train
+    - tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261023_eef_v1/train
+    - tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261024_eef_v1/train
+    - tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261026_static_eef_v1/train
+  eval_dataset_dir:
+    - tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261022_eef_v1/test
+    - tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261023_eef_v1/test
+    - tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261024_eef_v1/test
+    - tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261026_static_eef_v1/test
+  normalization_dataset_dir: tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261026_static_eef_v1/normalization
+
+training:
+  batch_size: 6
+  gradient_accumulation_steps: 8
+  num_epochs: 5
+  output_path: ${oc.env:OPENWAM_REPO_ROOT}/outputs/train_piper_x_20261022_20261026_tos_eef_16gpu_e5
+
+project:
+  output_dir: ${training.output_path}/hydra

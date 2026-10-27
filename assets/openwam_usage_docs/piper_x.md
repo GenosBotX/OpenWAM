@@ -7,9 +7,17 @@ Piper-X 使用 TOS 中按 episode 划分的数据，不需要把数据集复制�
 ```text
 tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261022_eef_v1/train
 tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261023_eef_v1/train
+tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261024_eef_v1/train
+tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261026_static_eef_v1/train
 ```
 
 测试路径由配置中的 `eval_dataset_dir` 指定，归一化统计由 `normalization_dataset_dir` 指定。训练和测试复用训练集统计。数据按需缓存到 `/tmp/openwam-piper-tos-cache`，默认上限为 4 GiB。
+
+全量训练包含 341 个 episode、209,727 个原始帧、199,903 个训练窗口。测试集为 38 个 episode、22,263 个窗口。训练和测试按完整 episode 划分。
+
+10 月 26 日的无目标数据包含 38 个 episode、22,875 帧，每帧生成一个静止样本，其中 20,962 个用于训练、1,913 个用于测试。每个静止样本重复同一帧的三路图像，以该帧实测 EEF state 作为全部 32 步 action，学习保持当前位置。图像在 TOS 上只保存一份，reader 读取时构造重复序列。
+
+所有训练源统一使用 `20261026_static_eef_v1/normalization` 下重新计算的统计。每个训练源的原始行各计一次，测试数据不参与统计。
 
 ## EEF 与图像约定
 
@@ -22,14 +30,17 @@ tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/202
 
 ## 训练
 
-当前训练配置为 `configs/train_piper_x_20261022_20261023_tos_eef_8gpu_e10.yaml`，入口为：
+当前训练配置为 `configs/train_piper_x_20261022_20261026_tos_eef_16gpu_e5.yaml`，在两个 Volcano worker 上使用同一入口：
 
 ```bash
-cd /vePFS/tangyuting/OpenWAM-tos
-bash scripts/piper/launch_volcano_piper_x_20261022_20261023_tos_eef_8gpu_e10.sh
+cd /vePFS/tangyuting/OpenWAM-CUDAGraph
+OPENWAM_TOS_CREDENTIALS=/vePFS/tangyuting/.config/openwam/tos-linglong.json \
+bash scripts/piper/launch_volcano_piper_x_20261022_20261026_tos_eef_16gpu_e5.sh
 ```
 
-默认使用单节点 8 卡、每卡 batch 4、梯度累积 24、10 个 epoch、bf16 和 ZeRO-2，从 Piper-X 基础权重初始化。TOS 凭证通过 `OPENWAM_TOS_CREDENTIALS` 或 `TOS_CREDENTIAL_FILE` 指定；也可以由任务环境注入 TOS 凭证变量。凭证不写入仓库或启动参数。
+默认使用 2 节点共 16 卡、每卡 batch 6、梯度累积 8、有效 batch 768、5 个 epoch、bf16 和 ZeRO-2，从 Piper-X 基础权重初始化。脚本从 Volcano worker hosts 解析主节点与节点序号，也支持显式设置 `MASTER_ADDR` 和 `NODE_RANK`。
+
+输入分辨率默认高 384、宽 320；使用高 288、宽 256 时在命令末尾加 `dataloader.height=288 dataloader.width=256`。TOS 凭证通过 `OPENWAM_TOS_CREDENTIALS` 或 `TOS_CREDENTIAL_FILE` 指定；也可以由任务环境注入 TOS 凭证变量。凭证不写入仓库或启动参数。
 
 数据读取、归一化、checkpoint 保存和训练状态均由通用 OpenWAM 训练入口处理；Piper-X 专属代码只负责 EEF 数据格式、TOS 数据源和图像布局。
 
@@ -52,7 +63,7 @@ training:
 续训时指定具体运行目录，并清空预训练入口：
 
 ```bash
-bash scripts/piper/launch_volcano_piper_x_20261022_20261023_tos_eef_8gpu_e10.sh \
+bash scripts/piper/launch_volcano_piper_x_20261022_20261026_tos_eef_16gpu_e5.sh \
   training.finetune_ckpt_path=null \
   training.resume_ckpt_path=/path/to/run
 ```
@@ -64,7 +75,7 @@ bash scripts/piper/launch_volcano_piper_x_20261022_20261023_tos_eef_8gpu_e10.sh 
 离线推理和 WebSocket 服务共用 `openwam.deploy.model_loader.load_from_checkpoint_dir`。服务启动入口为：
 
 ```bash
-cd /vePFS/tangyuting/OpenWAM-tos
+cd /vePFS/tangyuting/OpenWAM-CUDAGraph
 bash scripts/deploy.sh \
   --ckpt-dir /path/to/run \
   --device cuda:0 \

@@ -153,6 +153,7 @@ class TestDeployConfigLoading:
             "host",
             "port",
             "denoise_steps",
+            "zero_noise",
             "denoise_mode",
             "lead_modality",
             "variance_shift_alpha",
@@ -191,6 +192,27 @@ class TestDeployConfigLoading:
 
         cfg = deploy._apply_inference_overrides(cfg, args)
         assert OmegaConf.select(cfg, "inference.denoise_steps") == 20
+
+    @pytest.mark.parametrize("flag,expected", [(None, None), ("--zero-noise", True), ("--no-zero-noise", False)])
+    def test_cli_zero_noise_override(self, flag, expected):
+        from omegaconf import OmegaConf
+
+        deploy = self._policy_server()
+        args = deploy._build_argparser().parse_args([] if flag is None else [flag])
+        assert args.zero_noise is expected
+        cfg = deploy._load_deploy_yaml()
+        cfg = deploy._apply_inference_overrides(cfg, args)
+        assert OmegaConf.select(cfg, "inference.zero_noise") is expected
+
+    def test_cli_zero_noise_preserves_yaml_without_override(self):
+        from omegaconf import OmegaConf
+
+        deploy = self._policy_server()
+        args = deploy._build_argparser().parse_args([])
+        cfg = deploy._load_deploy_yaml()
+        cfg.inference.zero_noise = True
+        cfg = deploy._apply_inference_overrides(cfg, args)
+        assert OmegaConf.select(cfg, "inference.zero_noise") is True
 
     def test_cli_schedule_overrides(self):
         from omegaconf import OmegaConf

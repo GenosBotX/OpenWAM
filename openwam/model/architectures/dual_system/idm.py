@@ -943,6 +943,7 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
         height: int = 384,
         width: int = 320,
         seed: int = 42,
+        zero_noise: bool = False,
         tiled: bool = True,
         input_video_latents: Optional[Tensor] = None,
         num_inference_steps: int = 50,
@@ -976,6 +977,9 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
 
         action_num_frames = int(action_num_frames if action_num_frames is not None else num_frames)
 
+        if zero_noise and input_video_latents is not None:
+            raise ValueError("zero_noise cannot be combined with input_video_latents")
+
         # Wan uses its own native tiling grid; tile_size/tile_stride are not forwarded.
         inputs_shared = vb.preprocess_input_for_inference(
             prompt=prompt,
@@ -999,6 +1003,10 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
 
         if input_video_latents is not None:
             inputs_shared["latents"] = input_video_latents
+        if zero_noise:
+            inputs_shared["latents"] = torch.zeros_like(inputs_shared["latents"])
+            if "noise" in inputs_shared:
+                inputs_shared["noise"] = torch.zeros_like(inputs_shared["noise"])
         ref_latents = inputs_shared.get("first_frame_latents")
         if ref_latents is not None:
             latents = inputs_shared["latents"].clone()
@@ -1013,13 +1021,13 @@ class DualSystemIDMArchitecture(BaseWAMArchitecture):
         inputs_shared_with_proprio = self._append_proprio_context_token(dict(inputs_shared), proprio_arg)
 
         # Initialize latents
-        action_latents = torch.randn(
-            1,
-            action_num_frames - 1,
-            self.action_dim,
-            device=device,
-            dtype=dtype,
-            generator=torch.Generator(device=device).manual_seed(seed),
+        action_shape = (1, action_num_frames - 1, self.action_dim)
+        action_latents = (
+            torch.zeros(action_shape, device=device, dtype=dtype)
+            if zero_noise else torch.randn(
+                action_shape, device=device, dtype=dtype,
+                generator=torch.Generator(device=device).manual_seed(seed),
+            )
         )
 
         # Same inactive-dim pinning as BaseWAMArchitecture.generate: unsupervised

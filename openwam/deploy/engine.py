@@ -279,6 +279,8 @@ class JointInferenceEngine(BaseInferenceEngine):
                 - height (int, optional): defaults from cfg
                 - width (int, optional): defaults from cfg
                 - seed (int, optional): random seed, default 42
+                - zero_noise (bool, optional): zero video/action initial noise;
+                  defaults to inference.zero_noise (False)
                 - tiled (bool, optional): tiled VAE decoding, default True
                 - input_video_latents (Tensor, optional): precomputed video latents
                 - denoise_mode (str, optional): "sync" or "async"; "sync" ignores
@@ -360,6 +362,7 @@ class JointInferenceEngine(BaseInferenceEngine):
                 "height": conditions.get("height", getattr(inf_cfg, "height", 384)),
                 "width": conditions.get("width", getattr(inf_cfg, "width", 320)),
                 "seed": conditions.get("seed", 42),
+                "zero_noise": conditions.get("zero_noise", getattr(inf_cfg, "zero_noise", False)),
                 "tiled": conditions.get("tiled", True),
                 "input_video_latents": conditions.get("input_video_latents", None),
                 "num_inference_steps": denoise_steps,

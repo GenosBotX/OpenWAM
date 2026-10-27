@@ -1680,6 +1680,86 @@ def test_base_generate_dit_cache_reuses_joint_action_prediction(monkeypatch):
     assert result["actions"].shape == (3, 3)
 
 
+@pytest.mark.parametrize("zero_noise", [False, True])
+@pytest.mark.parametrize("preserve_first_frame", [False, True])
+def test_base_generate_zero_noise_initializes_video_and_action(monkeypatch, zero_noise, preserve_first_frame):
+    """The opt-in path zeros both streams before their first model forward."""
+    from openwam.model.architectures.base import BaseWAMArchitecture
+
+    monkeypatch.setattr(torch.compiler, "cudagraph_mark_step_begin", lambda: None)
+
+    class _Scheduler:
+        num_train_timesteps = 1000
+
+        @staticmethod
+        def flow_step(model_output, sigma, sigma_next, sample):
+            return sample + model_output * (sigma_next - sigma)
+
+    class _VideoBackbone(torch.nn.Module):
+        scheduler = _Scheduler()
+        external_encoder = None
+
+        @staticmethod
+        def preprocess_input_for_inference(**_kwargs):
+            inputs = {
+                "latents": torch.full((1, 1, 2, 1, 1), 3.0),
+                "noise": torch.full((1, 1, 2, 1, 1), 3.0),
+                "context": torch.full((1, 2, 3), 5.0),
+            }
+            if preserve_first_frame:
+                inputs["first_frame_latents"] = torch.full((1, 1, 1, 1, 1), 7.0)
+            return inputs
+
+    class _ActionBackbone(torch.nn.Module):
+        scheduler = _Scheduler()
+        action_dim = 3
+        bridge_layers = ()
+        uses_proprioception = False
+
+    class _Arch(BaseWAMArchitecture):
+        def __init__(self):
+            super().__init__(cfg=None)
+            self._device = torch.device("cpu")
+            self._dtype = torch.float32
+            self.video_backbone = _VideoBackbone()
+            self.action_backbone = _ActionBackbone()
+            self.first_inputs = None
+
+        def forward(self, noisy_actions, action_timestep, **kwargs):  # noqa: ARG002
+            assert torch.all(kwargs["context"] == 5)
+            assert torch.all(kwargs["noise"] == (0 if zero_noise else 3))
+            if self.first_inputs is None:
+                self.first_inputs = (kwargs["latents"].clone(), noisy_actions.clone())
+            return torch.zeros_like(kwargs["latents"]), torch.zeros_like(noisy_actions)
+
+    arch = _Arch()
+    arch.generate(
+        schedule=[(1000, 1000), (0, 0)],
+        prompt="",
+        num_frames=2,
+        action_num_frames=2,
+        seed=7,
+        zero_noise=zero_noise,
+        decode_video=False,
+    )
+
+    video_input, action_input = arch.first_inputs
+    expected_video = torch.full_like(video_input, 0 if zero_noise else 3)
+    if preserve_first_frame:
+        expected_video[:, :, :1] = 7
+    torch.testing.assert_close(video_input, expected_video, rtol=0, atol=0)
+    expected_action = (
+        torch.zeros_like(action_input) if zero_noise else
+        torch.randn(action_input.shape, generator=torch.Generator().manual_seed(7))
+    )
+    torch.testing.assert_close(action_input, expected_action, rtol=0, atol=0)
+    with pytest.raises(ValueError, match="input_video_latents"):
+        arch.generate(
+            schedule=[(1000, 1000), (0, 0)], prompt="", zero_noise=True,
+            input_video_latents=torch.zeros_like(video_input), decode_video=False,
+        )
+
+
 def test_base_generate_frozen_lag_stream_stays_in_forward_context(monkeypatch):
     """A sigma plateau (linear_offset delay) freezes a stream's *update* only: its
     tokens/timestep must stay in every forward, because v→a-visible attention

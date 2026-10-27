@@ -1397,6 +1397,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         height: int = 384,
         width: int = 320,
         seed: int = 42,
+        zero_noise: bool = False,
         tiled: bool = True,
         input_video_latents: Optional[Tensor] = None,
         num_inference_steps: int = 50,
@@ -1420,6 +1421,9 @@ class BaseWAMArchitecture(ABC, nn.Module):
         (engine) should call this instead of touching video_backbone directly.
 
         Args:
+            zero_noise: Initialize both video and action noise to zero. Image,
+                text and state conditioning are preserved. Experimental sampling
+                mode; not equivalent to seeded Gaussian inference.
             num_frames: Video frame count passed to the video backbone. For
                 RoboTwin this is the post-``video_stride`` count seen during
                 training, not the raw action window length.
@@ -1466,6 +1470,9 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
         action_num_frames = int(action_num_frames if action_num_frames is not None else num_frames)
 
+        if zero_noise and input_video_latents is not None:
+            raise ValueError("zero_noise cannot be combined with input_video_latents")
+
         # CFG knobs ARE forwarded so a CFG-capable backbone (CosmosPredict25)
         # can materialise ``inputs_shared['uncond_context']`` from its own
         # encoder; the denoising loop below then applies CFG via
@@ -1495,6 +1502,10 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
         if input_video_latents is not None:
             inputs_shared["latents"] = input_video_latents
+        if zero_noise:
+            inputs_shared["latents"] = torch.zeros_like(inputs_shared["latents"])
+            if "noise" in inputs_shared:
+                inputs_shared["noise"] = torch.zeros_like(inputs_shared["noise"])
         # Architecture-specific pipeline inputs (e.g. tri_system's vlm_inputs /
         # vlm_hidden / vlm_attention_mask) are forwarded as-is. Subclasses
         # extract what they recognize in their forward(); unrelated architectures
@@ -1516,13 +1527,13 @@ class BaseWAMArchitecture(ABC, nn.Module):
         if callable(request_prepare):
             inputs_shared = request_prepare(inputs_shared, proprio=proprio, cfg_scale=cfg_scale_f)
 
-        action_latents = torch.randn(
-            1,
-            action_num_frames - 1,
-            self.action_dim,
-            device=device,
-            dtype=dtype,
-            generator=torch.Generator(device=device).manual_seed(seed),
+        action_shape = (1, action_num_frames - 1, self.action_dim)
+        action_latents = (
+            torch.zeros(action_shape, device=device, dtype=dtype)
+            if zero_noise else torch.randn(
+                action_shape, device=device, dtype=dtype,
+                generator=torch.Generator(device=device).manual_seed(seed),
+            )
         )
 
         # Unified-action checkpoints scatter raw actions into a larger zero-padded

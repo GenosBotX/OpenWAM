@@ -516,6 +516,10 @@ def _build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=None, help="WebSocket port override.")
     parser.add_argument("--readiness-token", help=argparse.SUPPRESS)
     parser.add_argument(
+        "--zero-noise", action=argparse.BooleanOptionalAction, default=None,
+        help="Initialize video and action noise to zero (experimental); overrides inference.zero_noise.",
+    )
+    parser.add_argument(
         "--denoise-steps",
         type=int,
         default=None,
@@ -641,6 +645,9 @@ def _apply_inference_overrides(cfg, args):
 
     if args.denoise_steps is not None:
         OmegaConf.update(cfg, "inference.denoise_steps", args.denoise_steps, merge=False)
+    zero_noise_override = vars(args).get("zero_noise")
+    if zero_noise_override is not None:
+        OmegaConf.update(cfg, "inference.zero_noise", zero_noise_override, merge=False)
     if args.denoise_mode is not None:
         OmegaConf.update(cfg, "inference.denoise_mode", args.denoise_mode, merge=False)
 
@@ -734,9 +741,10 @@ def main(argv: Optional[list[str]] = None):
         readiness_token=args.readiness_token,
     )
     logging.getLogger("deploy").info(
-        "Inference engine ready — steps=%d denoise_mode=%s",
+        "Inference engine ready — steps=%d denoise_mode=%s zero_noise=%s",
         OmegaConf.select(server.cfg, "inference.denoise_steps", default=20),
         OmegaConf.select(server.cfg, "inference.denoise_mode", default="sync"),
+        OmegaConf.select(server.cfg, "inference.zero_noise", default=False),
     )
     server.run(host=host, port=port)
 

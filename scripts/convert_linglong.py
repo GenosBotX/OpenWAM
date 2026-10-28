@@ -68,7 +68,7 @@ def _nearest(timestamps, targets):
     return np.where(abs(timestamps[left] - targets) <= abs(timestamps[right] - targets), left, right)
 
 
-def sample_episode(streams, fk):
+def sample_episode(streams, fk, head_grid_tolerance_ns=20_000_000):
     """Use the historical head-master alignment, then nearest 15Hz grid.
 
     State EEF matches the selected driver's exact /end_pos timestamp when
@@ -87,8 +87,9 @@ def sample_episode(streams, fk):
             raise ValueError(f"{key}: original head alignment exceeds 80ms")
     grid = head[0] + np.rint(np.arange(int((head[-1] - head[0]) * FPS / 1e9) + 1) * 1e9 / FPS).astype(np.int64)
     selected_head = _nearest(head, grid)
-    if np.any(abs(head[selected_head] - grid) > 20_000_000):
-        raise ValueError("15Hz head alignment exceeds 20ms")
+    if np.any(abs(head[selected_head] - grid) > head_grid_tolerance_ns):
+        limit_ms = head_grid_tolerance_ns / 1_000_000
+        raise ValueError(f"15Hz head alignment exceeds {limit_ms:g}ms")
     if len(grid) < NUM_FRAMES:
         raise ValueError(f"episode has {len(grid)} frames; OpenWAM requires at least {NUM_FRAMES}")
     selected = {key: indices[selected_head] for key, indices in aligned.items()}
@@ -257,7 +258,7 @@ def _write_split(root, split, records, tasks, train_stats, stage, contracts, pro
 
 
 def convert_raw(input_path, output_root, *, prompt=None, episode_config=None, test_fraction=.1, seed=0,
-                model=DEFAULT_MODEL, scratch=None):
+                model=DEFAULT_MODEL, scratch=None, head_grid_tolerance_ns=20_000_000):
     input_path = Path(input_path).expanduser().resolve(strict=True)
     output_root = Path(output_root).expanduser().resolve()
     if output_root.exists():
@@ -277,7 +278,8 @@ def convert_raw(input_path, output_root, *, prompt=None, episode_config=None, te
     stage = output_root / ".staging"
     stage.mkdir()
     report = {"status": "incomplete", "input": str(input_path), "model_sha256": _sha256(model),
-              "test_fraction": test_fraction, "seed": seed, "duplicates": []}
+              "test_fraction": test_fraction, "seed": seed,
+              "head_grid_tolerance_ns": int(head_grid_tolerance_ns), "duplicates": []}
     _write_json(output_root / "conversion.json", report)
     records, seen, config_used = [], {}, set()
     for source_id, bag, metadata in iter_bags(input_path, scratch):
@@ -301,7 +303,7 @@ def convert_raw(input_path, output_root, *, prompt=None, episode_config=None, te
             raise ValueError(f"{source_id}: split must be train/test")
         streams = read_bag(bag)
         try:
-            payload = sample_episode(streams, fk)
+            payload = sample_episode(streams, fk, head_grid_tolerance_ns)
         except ValueError as exc:
             raise ValueError(f"{source_id}: {exc}") from exc
         image_id = f"episode_{len(records):06d}"
@@ -364,12 +366,17 @@ def main():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--model", type=Path, default=DEFAULT_MODEL, help="optional FK XML or linglong.zip; defaults to repository asset")
     parser.add_argument("--scratch-dir", type=Path, help="temporary archive extraction directory (default: system temp)")
+    parser.add_argument("--head-grid-tolerance-ms", type=float, default=20,
+                        help="maximum head-camera error against the 15Hz grid; head gaps above 50ms still fail")
     args = parser.parse_args()
     if args.prompt is None and args.episode_config is None:
         parser.error("pass --prompt or --episode-config; task meaning is not inferred from filenames")
     config = json.loads(args.episode_config.read_text()) if args.episode_config else None
+    if not np.isfinite(args.head_grid_tolerance_ms) or args.head_grid_tolerance_ms <= 0:
+        parser.error("--head-grid-tolerance-ms must be positive")
     convert_raw(args.input, args.output_root, prompt=args.prompt, episode_config=config,
-                test_fraction=args.test_fraction, seed=args.seed, model=args.model, scratch=args.scratch_dir)
+                test_fraction=args.test_fraction, seed=args.seed, model=args.model, scratch=args.scratch_dir,
+                head_grid_tolerance_ns=int(round(args.head_grid_tolerance_ms * 1_000_000)))
 
 
 if __name__ == "__main__":

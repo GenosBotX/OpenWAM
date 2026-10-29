@@ -117,6 +117,18 @@ def precompute_freqs_cis(dim: int, end: int = 1024, theta: float = 10000.0):
 
 
 def rope_apply(x, freqs, num_heads):
+    # Ascend uses real FP32 rotation; preserve the original CUDA numerics.
+    if x.device.type == "npu":
+        dtype = x.dtype
+        x = rearrange(x, "b s (n d) -> b s n d", n=num_heads).to(torch.float32)
+        b, s, n, d = x.shape
+        cos = freqs.real.to(torch.float32)
+        sin = freqs.imag.to(torch.float32)
+        x_pairs = x.reshape(b, s, n, d // 2, 2)
+        x_even, x_odd = x_pairs[..., 0], x_pairs[..., 1]
+        out = torch.stack((x_even * cos - x_odd * sin, x_even * sin + x_odd * cos), dim=-1)
+        return out.reshape(b, s, n, d).flatten(2).to(dtype)
+
     x = rearrange(x, "b s (n d) -> b s n d", n=num_heads)
     x_out = torch.view_as_complex(x.to(torch.float64).reshape(x.shape[0], x.shape[1], x.shape[2], -1, 2))
     x_out = torch.view_as_real(x_out * freqs).flatten(2)

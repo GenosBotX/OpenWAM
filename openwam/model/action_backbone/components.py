@@ -56,6 +56,18 @@ def rope_apply_1d(x: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
     Returns:
         Rotated tensor with the same dtype and shape as ``x``.
     """
+    # Ascend uses real FP32 rotation; preserve the original CUDA numerics.
+    if x.device.type == "npu":
+        dtype = x.dtype
+        x = x.to(torch.float32)
+        d = x.shape[-1]
+        cos = freqs.real.to(device=x.device, dtype=torch.float32).view(1, 1, x.shape[-2], d // 2)
+        sin = freqs.imag.to(device=x.device, dtype=torch.float32).view(1, 1, x.shape[-2], d // 2)
+        x_pairs = x.reshape(*x.shape[:-1], d // 2, 2)
+        x_even, x_odd = x_pairs[..., 0], x_pairs[..., 1]
+        out = torch.stack((x_even * cos - x_odd * sin, x_even * sin + x_odd * cos), dim=-1)
+        return out.reshape(*x.shape[:-1], d).to(dtype)
+
     x_c = torch.view_as_complex(x.to(torch.float64).reshape(*x.shape[:-1], -1, 2))
     freqs = freqs.to(x_c.device).view(1, 1, x_c.shape[-2], x_c.shape[-1])
     return torch.view_as_real(x_c * freqs).flatten(-2).to(x.dtype)

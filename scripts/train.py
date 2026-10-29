@@ -8,6 +8,18 @@ gradient accumulation/clipping, optimizer offload) from cfg.training
 (e.g. select the ZeRO stage via ``training.zero_stage=1``).
 """
 
+# Ascend's compatibility layer must be enabled before model/Accelerate imports.
+# CUDA hosts retain their existing execution path.
+try:
+    import torch_npu
+except ModuleNotFoundError as exc:
+    if exc.name != "torch_npu":
+        raise
+else:
+    import torch
+    if torch.npu.is_available():
+        from torch_npu.contrib import transfer_to_npu  # noqa: F401
+
 import faulthandler
 import logging
 import os

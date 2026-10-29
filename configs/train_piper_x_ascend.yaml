@@ -1,0 +1,37 @@
+# Matches the saved 2026-10-27_17-48-18 run; local immutable data mirror.
+defaults:
+  - train_piper_x_20261022_20261027_tos_eef_16gpu_e5
+  - _self_
+
+# The inherited Wan config contains a placeholder path.  Keep both entries
+# explicit because the native VAE encoder is configured separately from DiT.
+model:
+  video_backbone:
+    model_path: ${oc.env:OPENWAM_WAN_MODEL_DIR,/home/ma-user/work/customer-test/OpenWAM-main/assets/video_backbone_ckpt/Wan2.2-TI2V-5B}
+    encoder:
+      model_path: ${oc.env:OPENWAM_WAN_MODEL_DIR,/home/ma-user/work/customer-test/OpenWAM-main/assets/video_backbone_ckpt/Wan2.2-TI2V-5B}
+
+dataloader:
+  dataset_dir:
+    - ${oc.env:OPENWAM_DATA_ROOT}/20261022_eef_v1/train
+    - ${oc.env:OPENWAM_DATA_ROOT}/20261023_eef_v1/train
+    - ${oc.env:OPENWAM_DATA_ROOT}/20261024_eef_v1/train
+    - ${oc.env:OPENWAM_DATA_ROOT}/20261026_eef_v2/train
+    - ${oc.env:OPENWAM_DATA_ROOT}/20261026_static_eef_v2/train
+    - ${oc.env:OPENWAM_DATA_ROOT}/20261027_eef_v1/train
+    - ${oc.env:OPENWAM_DATA_ROOT}/20261027_static_eef_v1/train
+  eval_dataset_dir:
+    - ${oc.env:OPENWAM_DATA_ROOT}/20261022_eef_v1/test
+    - ${oc.env:OPENWAM_DATA_ROOT}/20261023_eef_v1/test
+    - ${oc.env:OPENWAM_DATA_ROOT}/20261024_eef_v1/test
+    - ${oc.env:OPENWAM_DATA_ROOT}/20261026_eef_v2/test
+    - ${oc.env:OPENWAM_DATA_ROOT}/20261026_static_eef_v2/test
+    - ${oc.env:OPENWAM_DATA_ROOT}/20261027_eef_v1/test
+    - ${oc.env:OPENWAM_DATA_ROOT}/20261027_static_eef_v1/test
+  normalization_dataset_dir: ${oc.env:OPENWAM_DATA_ROOT}/20261022_20261027_normalization_v1
+training:
+  finetune_ckpt_path: ${oc.env:OPENWAM_BASE_CHECKPOINT}
+  checkpoint_base_path: ${oc.env:OPENWAM_BASE_CHECKPOINT}
+  output_path: ${oc.env:OPENWAM_REPO_ROOT}/outputs/piper_x_ascend_1027
+project:
+  output_dir: ${training.output_path}/hydra

@@ -136,9 +136,11 @@ class PiperXDataset(BaseDataset):
         raw_dir = str(configured)
         remote = raw_dir.startswith("tos://")
         dataset_dir = raw_dir if remote else Path(raw_dir)
-        if remote and split in ("test", "val"):
-            dataset_dir = get_cfg(config, "eval_dataset_dir", None)
-            if not dataset_dir:
+        if split in ("test", "val"):
+            evaluation_dir = get_cfg(config, "eval_dataset_dir", None)
+            if evaluation_dir:
+                dataset_dir = str(evaluation_dir) if str(evaluation_dir).startswith("tos://") else Path(evaluation_dir)
+            elif remote:
                 raise ValueError("TOS evaluation requires eval_dataset_dir")
         if not remote and split in ("test", "val") and dataset_dir.name.endswith("_train_15hz"):
             candidate = dataset_dir.with_name(dataset_dir.name.replace("_train_15hz", "_test_15hz"))

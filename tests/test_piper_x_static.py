@@ -88,3 +88,18 @@ def test_normal_sequence_keeps_temporal_motion(tmp_path):
     assert sample["start_frame"] == 1
     assert sample["action"][0, 0] != sample["action"][-1, 0]
     assert not np.array_equal(np.asarray(sample["video"][0]), np.asarray(sample["video"][-1]))
+
+
+def test_local_explicit_evaluation_uses_test_bucket(tmp_path):
+    train = make_bucket(tmp_path / "train", True, [3])
+    test = make_bucket(tmp_path / "test", True, [2])
+    manifest = json.loads((test / "manifest.json").read_text())
+    manifest["split"] = "test"
+    (test / "manifest.json").write_text(json.dumps(manifest))
+    dataset = PiperXDataset.from_config({
+        "dataset_dir": [str(train)], "eval_dataset_dir": [str(test)],
+        "normalization_dataset_dir": str(train), "action_mode": "eef",
+        "height": 32, "width": 32,
+    }, split="test")
+    assert len(dataset) == 2
+    assert dataset.datasets[0].split == "test"

@@ -41,7 +41,11 @@ def test_piper_x_eef20_contract_and_runtime_chunk_length():
     assert "contract_id" not in repr_contract_from_cfg(cfg)
     cfg.dataloader.action_mode = "eef"
     cfg.dataloader.relative_to_state = True
-    assert "contract_id" not in repr_contract_from_cfg(cfg)
+    relative = repr_contract_from_cfg(cfg)
+    assert relative["contract_id"] == "piper-x-absolute-eef20-v1"
+    assert relative["model_action_contract_id"] == "piper-x-relative-eef20-base-v1"
+    assert relative["model_action_target"] == "relative_pose"
+    assert relative["action_target"] == "absolute_pose"
 
 
 def test_repr_contract_preserves_optional_legacy_markers():

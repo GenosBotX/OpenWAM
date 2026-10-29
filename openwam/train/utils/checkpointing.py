@@ -113,6 +113,12 @@ def _normalization_transforms_equal(left, right) -> bool:
     """
     if not isinstance(left, dict) or not isinstance(right, dict):
         return False
+    # Equal affine vectors do not imply equal absolute/relative pose semantics.
+    # Never resume a relative model with a missing or different reference rule.
+    if not _normalization_stats_values_equal(
+        left.get("piper_x_action_contract"), right.get("piper_x_action_contract")
+    ):
+        return False
     left_modes = {
         key: value
         for key, value in left.items()

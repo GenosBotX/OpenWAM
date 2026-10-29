@@ -265,6 +265,14 @@ def repr_contract_from_cfg(cfg: DictConfig) -> dict:
     contract = {
         "representation": str(OmegaConf.select(cfg, "dataloader.action_mode", default="joint")),
     }
+    relative = bool(OmegaConf.select(cfg, "dataloader.relative_to_state", default=False))
+    if relative and OmegaConf.select(cfg, "dataloader.type") == "piper_x":
+        if contract["representation"] != "eef" or OmegaConf.select(cfg, "dataloader.normalize_mode") != "min-max":
+            raise ValueError("Relative Piper-X checkpoints require EEF20 and min-max normalization")
+        for field in ("active_raw_action_dims", "active_raw_state_dims"):
+            dims_config = OmegaConf.select(cfg, "dataloader." + field, default=None)
+            if dims_config is not None and sorted(dims_config) != list(range(20)):
+                raise ValueError("Relative Piper-X checkpoints require all 20 action/state dimensions")
     if dims:
         contract["binary_action_dims"] = [int(d) for d in dims]
     if gripper_convention is not None:
@@ -272,7 +280,6 @@ def repr_contract_from_cfg(cfg: DictConfig) -> dict:
     if (
         OmegaConf.select(cfg, "dataloader.type") == "piper_x"
         and contract["representation"] == "eef"
-        and OmegaConf.select(cfg, "dataloader.relative_to_state", default=False) is False
         and OmegaConf.select(cfg, "dataloader.normalize_mode") == "min-max"
     ):
         # The Piper-X reader packs absolute poses as xyz + two rotation
@@ -298,6 +305,17 @@ def repr_contract_from_cfg(cfg: DictConfig) -> dict:
             image_color_order="rgb",
             prompt_template="raw",
         )
+        if relative:
+            from openwam.dataloader.utils.relative_eef import RELATIVE_SEMANTICS
+
+            # Wire actions remain absolute EEF20. Only the model's training
+            # targets differ; the engine reconstructs before any executor buffers.
+            contract.update(
+                model_action_contract_id="piper-x-relative-eef20-base-v1",
+                model_action_target="relative_pose",
+                model_action_contract=dict(RELATIVE_SEMANTICS),
+                relative_actions_decoded_by="server",
+            )
     return contract
 
 
@@ -343,6 +361,19 @@ def _build_inner_normalizer(cfg: DictConfig, ckpt_dir: str):
             "Checkpoints with active action normalization must include it "
             "(older action_stats.npy checkpoints: rename the file)."
         )
+    if OmegaConf.select(cfg, "dataloader.type") == "piper_x":
+        from openwam.dataloader.utils.relative_eef import validate_relative_metadata
+
+        raw_stats = np.load(stats_path, allow_pickle=True).item()
+        metadata = raw_stats.get("piper_x_action_contract")
+        if OmegaConf.select(cfg, "dataloader.relative_to_state", default=False):
+            if "eef_state" not in raw_stats:
+                raise ValueError("Relative Piper-X checkpoint requires separate absolute eef_state statistics")
+            validate_relative_metadata(metadata or {},
+                num_frames=int(OmegaConf.select(cfg, "dataloader.num_frames", default=33)),
+                window_stride=int(OmegaConf.select(cfg, "dataloader.window_stride", default=1)))
+        elif metadata is not None:
+            raise ValueError("Absolute Piper-X checkpoint cannot load relative action statistics")
     logger.info("[normalizer] Found pre-computed stats file: %s (exists ✓)", stats_path)
 
     from openwam.dataloader.transforms.normalize import (

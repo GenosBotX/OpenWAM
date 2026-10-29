@@ -35,6 +35,10 @@ from openwam.dataloader.transforms.multiview import assemble_multiview_layout
 from openwam.dataloader.utils import get_cfg
 from openwam.dataloader.utils.normalization import ROT6D_DIMS_EEF20, apply_normalization, pin_rot6d_identity
 from openwam.dataloader.utils.poses import arms_to_eef20
+from openwam.dataloader.utils.relative_eef import (
+    RELATIVE_SEMANTICS, RELATIVE_STATS_FORMAT, absolute_to_relative_eef20,
+    validate_relative_metadata,
+)
 from openwam.dataloader.utils.unify_action import UNIFY_DIM, map_to_unify, parse_unify_spec
 
 
@@ -218,8 +222,9 @@ class PiperXDataset(BaseDataset):
                 f"Piper X action_mode must be one of {sorted(ACTION_MODES)}, got {self.action_mode!r}"
             )
         self.raw_dim, default_unify_map = ACTION_MODES[self.action_mode]
-        if relative_to_state:
-            raise ValueError("This dataset uses absolute EEF actions; relative_to_state must be false")
+        self.relative_to_state = bool(relative_to_state)
+        if self.relative_to_state and self.action_mode != "eef":
+            raise ValueError("Relative Piper-X actions require action_mode=eef (EEF20 rot6d)")
         self.state_key = STATE_COLUMN
         self.action_key = ACTION_COLUMN
         self.num_frames = int(num_frames)
@@ -235,6 +240,8 @@ class PiperXDataset(BaseDataset):
         self.height = int(height)
         self.width = int(width)
         self.normalize_mode = None if normalize_mode in (None, "", "none", "null") else str(normalize_mode)
+        if self.relative_to_state and self.normalize_mode != "min-max":
+            raise ValueError("Relative Piper-X training requires min-max normalization")
         if self.normalize_mode not in (None, "min-max", "z-score", "quantile"):
             raise ValueError(f"unsupported normalize_mode={self.normalize_mode!r}")
         self.camera_layout = list(camera_layout or ["head", "left", "right"])
@@ -257,6 +264,7 @@ class PiperXDataset(BaseDataset):
                 raise FileNotFoundError(f"Piper X images are missing under {self._source_root}")
         self._images = DatasetStorage(self._source_root, self.tos_cache)
         self._prompt = str(manifest["prompt"])
+        self.static_hold = bool(manifest.get("static_hold", False))
         self._episodes = [json.loads(line) for line in self._storage.text("meta/episodes.jsonl").splitlines() if line.strip()]
         self._tables = [f"data/chunk-{index // 1000:03d}/episode_{index:06d}.parquet" for index in range(len(self._episodes))]
 
@@ -272,6 +280,8 @@ class PiperXDataset(BaseDataset):
             )
         self.raw_action_mask = self._raw_mask(action_dims)
         self.raw_state_mask = self._raw_mask(state_dims)
+        if self.relative_to_state and not (self.raw_action_mask.all() and self.raw_state_mask.all()):
+            raise ValueError("Relative Piper-X EEF requires all 20 action and state dimensions")
 
         self.unify_action = bool(unify_action)
         if self.unify_action:
@@ -292,8 +302,9 @@ class PiperXDataset(BaseDataset):
             self._state_dim = self.raw_dim
 
         self._windows = []
+        window_extent = 1 if self.static_hold else self.num_frames
         for local, episode in enumerate(self._episodes):
-            max_start = int(episode["length"]) - self.num_frames
+            max_start = int(episode["length"]) - window_extent
             if max_start >= 0:
                 self._windows.extend((local, start) for start in range(0, max_start + 1, self.window_stride))
         if not self._windows:
@@ -314,14 +325,20 @@ class PiperXDataset(BaseDataset):
         stats_storage = DatasetStorage(stats_dir, self.tos_cache)
         if self.action_mode == "eef":
             try:
-                payload = json.loads(stats_storage.text("meta/eef20_normalization_stats.json"))
+                stats_file = "relative_eef20_normalization_stats.json" if self.relative_to_state else "eef20_normalization_stats.json"
+                payload = json.loads(stats_storage.text("meta/" + stats_file))
             except FileNotFoundError:
-                if stats_storage.remote:
+                if stats_storage.remote or self.relative_to_state:
                     raise
                 self._action_stats, self._state_stats = _eef20_stats(str(stats_dir))
             else:
-                if payload.get("format") != "piper_x_eef20_normalization_v1" or not payload.get("test_excluded"):
+                expected_format = RELATIVE_STATS_FORMAT if self.relative_to_state else "piper_x_eef20_normalization_v1"
+                if payload.get("format") != expected_format or not payload.get("test_excluded"):
                     raise ValueError("EEF20 statistics must be computed from training frames only")
+                if self.relative_to_state:
+                    validate_relative_metadata(payload, num_frames=self.num_frames, window_stride=self.window_stride)
+                    if self.split == "train" and str(self.dataset_dir) not in payload.get("sources", {}):
+                        raise ValueError("Relative EEF statistics do not include this training source")
                 self._action_stats, self._state_stats = [
                     {key: np.asarray(payload[stream][key],dtype=np.float32) for key in ("mean","std","min","max","q01","q99")}
                     for stream in ("action","state")]
@@ -338,6 +355,11 @@ class PiperXDataset(BaseDataset):
             self.action_mode: self._action_stats,
             f"{self.action_mode}_state": self._state_stats,
         }
+        if self.relative_to_state:
+            self.normalization_stats_payload["piper_x_action_contract"] = {
+                **RELATIVE_SEMANTICS, "num_frames": self.num_frames,
+                "window_stride": self.window_stride,
+            }
         self.normalization_stats_path = None
 
     @staticmethod
@@ -405,10 +427,23 @@ class PiperXDataset(BaseDataset):
 
     def __getitem__(self, index: int) -> dict:
         local, start = self._windows[index]
-        frames_idx = np.arange(start, start + self.num_frames, dtype=np.int64)
-        table = self._read_table(local).take(pa.array(frames_idx))
-        state = np.asarray(table[STATE_COLUMN].to_pylist(), dtype=np.float32)
-        action = np.asarray(table[ACTION_COLUMN].to_pylist(), dtype=np.float32)
+        if self.static_hold:
+            table = self._read_table(local).slice(start, 1)
+            observed_state = np.asarray(table[STATE_COLUMN].to_pylist(), dtype=np.float32)
+            recorded_action = np.asarray(table[ACTION_COLUMN].to_pylist(), dtype=np.float32)
+            if observed_state.shape != (1, EEF_DIM) or recorded_action.shape != (1, EEF_DIM):
+                raise ValueError(f"Piper X static row shape mismatch: state={observed_state.shape}, action={recorded_action.shape}")
+            if not np.array_equal(observed_state, recorded_action):
+                raise ValueError("static_hold bucket must store action_eef identical to observation.state_eef")
+            state = np.repeat(observed_state, self.num_frames, axis=0)
+            action = np.repeat(observed_state, self.num_frames, axis=0)
+            video_indices = (0,)
+        else:
+            frames_idx = np.arange(start, start + self.num_frames, dtype=np.int64)
+            table = self._read_table(local).take(pa.array(frames_idx))
+            state = np.asarray(table[STATE_COLUMN].to_pylist(), dtype=np.float32)
+            action = np.asarray(table[ACTION_COLUMN].to_pylist(), dtype=np.float32)
+            video_indices = VIDEO_INDICES
         if state.shape != (self.num_frames, EEF_DIM) or action.shape != (self.num_frames, EEF_DIM):
             raise ValueError(f"Piper X row shape mismatch: state={state.shape}, action={action.shape}")
         if not np.isfinite(state).all() or not np.isfinite(action).all():
@@ -421,9 +456,11 @@ class PiperXDataset(BaseDataset):
         if self.action_mode == "eef":
             state = _pack_eef20(state)
             action = _pack_eef20(action)
+        if self.relative_to_state:
+            action = absolute_to_relative_eef20(action, state[0])
 
         images = []
-        for frame in VIDEO_INDICES:
+        for frame in video_indices:
             cameras = {
                 "head": self._image(table["observation.images.head"][int(frame)].as_py()),
                 "left": self._image(table["observation.images.left"][int(frame)].as_py()),
@@ -433,6 +470,8 @@ class PiperXDataset(BaseDataset):
                 images.append(assemble_multiview_layout(cameras, self.camera_layout, self.height, self.width))
             else:
                 images.append(cameras["head"].resize((self.width, self.height), Image.BILINEAR))
+        if self.static_hold:
+            images = [images[0].copy() for _ in VIDEO_INDICES]
 
         raw_action = np.asarray(apply_normalization(action[:self.num_frames - 1], self._action_stats, self.normalize_mode), dtype=np.float32)
         raw_state = np.asarray(apply_normalization(state[:1], self._state_stats, self.normalize_mode), dtype=np.float32)
@@ -474,7 +513,7 @@ class PiperXCollection(BaseDataset):
     def __init__(self, datasets):
         first = datasets[0]
         for dataset in datasets[1:]:
-            if (dataset.action_dim, dataset.state_dim, dataset.action_mode) != (first.action_dim, first.state_dim, first.action_mode):
+            if (dataset.action_dim, dataset.state_dim, dataset.action_mode, dataset.relative_to_state) != (first.action_dim, first.state_dim, first.action_mode, first.relative_to_state):
                 raise ValueError("Piper-X sources must use the same EEF representation")
             for stream in ("_action_stats", "_state_stats"):
                 left, right = getattr(first, stream), getattr(dataset, stream)

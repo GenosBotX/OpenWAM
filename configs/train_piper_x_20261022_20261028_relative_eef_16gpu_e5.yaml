@@ -1,0 +1,14 @@
+# 相对本次绝对输入 state 的 Piper-X EEF20；沿用全量数据和 16 卡训练参数。
+defaults:
+  - train_piper_x_20261022_20261028_tos_eef_16gpu_e5
+  - _self_
+
+dataloader:
+  relative_to_state: true
+  normalization_dataset_dir: tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261022_20261028_relative_normalization_v1
+
+training:
+  output_path: ${oc.env:OPENWAM_REPO_ROOT}/outputs/train_piper_x_20261022_20261028_relative_eef_16gpu_e5
+
+project:
+  output_dir: ${training.output_path}/hydra

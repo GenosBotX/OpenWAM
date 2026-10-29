@@ -41,6 +41,12 @@ full (T, D) matrix generated from each obs. Responses also carry
 ``action_response_mode``, ``num_actions``, and ``action_dim``; ``step`` counts
 requests. The client schedules execution at the checkpoint's action rate.
 
+Relative Piper-X checkpoints unnormalize on the server in either mode.
+``inference.relative_action_output=absolute`` (default) reconstructs those
+physical relative EEF20 poses against the request state before they enter an
+execution buffer or the WebSocket. ``relative`` skips reconstruction and
+advertises ``action_target=relative_pose`` so the client can convert.
+
 Usage:
     server = PolicyServer(engine, cfg)
     server.run(host="0.0.0.0", port=8848)
@@ -150,6 +156,9 @@ class PolicyServer:
         self.cfg = cfg
         self.readiness_token = readiness_token
         self.action_response_mode = _action_response_mode(cfg)
+        from openwam.deploy.relative_actions import apply_wire_relative_action_output
+
+        apply_wire_relative_action_output(self._ckpt_contract(), self._relative_output_cfg())
 
         # Lazy imports at init time to validate availability
         self._policy = None
@@ -183,6 +192,10 @@ class PolicyServer:
             d.img_width,
         )
 
+    def _relative_output_cfg(self):
+        """Prefer the engine config so handshake matches reconstruction."""
+        return getattr(self.engine, "cfg", None) or self.cfg
+
     def _ckpt_contract(self) -> dict:
         """Representation-contract fields advertised in the PONG for client-side validation.
 
@@ -200,7 +213,9 @@ class PolicyServer:
     def _pong_payload(self) -> dict:
         """Return checkpoint compatibility plus optional launch ownership."""
 
-        result = self._ckpt_contract()
+        from openwam.deploy.relative_actions import apply_wire_relative_action_output
+
+        result = apply_wire_relative_action_output(self._ckpt_contract(), self._relative_output_cfg())
         # Linglong clients use the wire name "eef" for the 16D quaternion
         # contract. Keep the checkpoint's internal eef_quat representation
         # unchanged: it selects the state/action transforms and statistics.
@@ -580,6 +595,15 @@ def _build_argparser() -> argparse.ArgumentParser:
         help="Override inference.inference_delay_steps (async only).",
     )
     parser.add_argument(
+        "--relative-action-output",
+        choices=("absolute", "relative"),
+        default=None,
+        dest="relative_action_output",
+        help="Override inference.relative_action_output. Relative checkpoints "
+        "always unnormalize; absolute (default) also reconstructs to world EEF20, "
+        "relative sends that physical relative chunk to the client.",
+    )
+    parser.add_argument(
         "overrides",
         nargs="*",
         help="Additional OmegaConf dotlist overrides, e.g. model/video_backbone=cosmos_predict25_2b",
@@ -616,9 +640,12 @@ def _validate_inference_config(cfg):
     """Validate denoising and executor settings before model loading."""
     from openwam.deploy.executors import resolve_execution_config
 
+    from openwam.deploy.relative_actions import relative_action_output_mode
+
     _validate_denoise_config(cfg)
     resolve_execution_config(cfg)
     _action_response_mode(cfg)
+    relative_action_output_mode(cfg)
 
 
 def _load_deploy_yaml(config_path: Optional[str] = None):
@@ -643,6 +670,8 @@ def _apply_inference_overrides(cfg, args):
         OmegaConf.update(cfg, "inference.denoise_steps", args.denoise_steps, merge=False)
     if args.denoise_mode is not None:
         OmegaConf.update(cfg, "inference.denoise_mode", args.denoise_mode, merge=False)
+    if getattr(args, "relative_action_output", None) is not None:
+        OmegaConf.update(cfg, "inference.relative_action_output", args.relative_action_output, merge=False)
 
     defaults = DenoiseConfig()
     async_controls = (

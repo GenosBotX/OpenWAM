@@ -308,8 +308,9 @@ def repr_contract_from_cfg(cfg: DictConfig) -> dict:
         if relative:
             from openwam.dataloader.utils.relative_eef import RELATIVE_SEMANTICS
 
-            # Wire actions remain absolute EEF20. Only the model's training
-            # targets differ; the engine reconstructs before any executor buffers.
+            # Default wire actions remain absolute EEF20. Only the model's
+            # training targets differ; the engine reconstructs before any
+            # executor buffers unless inference.relative_action_output=relative.
             contract.update(
                 model_action_contract_id="piper-x-relative-eef20-base-v1",
                 model_action_target="relative_pose",

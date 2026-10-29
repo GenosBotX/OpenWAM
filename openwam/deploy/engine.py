@@ -338,10 +338,13 @@ class JointInferenceEngine(BaseInferenceEngine):
         if proprio is None:
             observation = conditions.get("observation") or {}
             proprio = observation.get("state") if isinstance(observation, dict) else None
-        from openwam.deploy.relative_actions import capture_action_reference, restore_action_chunk
+        from openwam.deploy.relative_actions import (
+            capture_action_reference, restore_action_chunk, should_restore_relative_actions,
+        )
 
-        reference_state = capture_action_reference(
-            getattr(self.architecture, "repr_contract", {}) or {}, proprio)
+        contract = getattr(self.architecture, "repr_contract", {}) or {}
+        restore_relative = should_restore_relative_actions(self.cfg, contract)
+        reference_state = capture_action_reference(contract, proprio)
         if proprio is not None:
             proprio = self.architecture.normalize_deploy_proprio(proprio)
 
@@ -379,7 +382,8 @@ class JointInferenceEngine(BaseInferenceEngine):
             }
         )
         result = self.architecture.generate(**generate_kwargs)
-        result = restore_action_chunk(result, reference_state)
+        if restore_relative:
+            result = restore_action_chunk(result, reference_state)
 
         # Attach optimization stats if profiling
         if self._profile and self._dit_cache is not None:

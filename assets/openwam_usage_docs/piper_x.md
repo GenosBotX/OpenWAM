@@ -139,7 +139,7 @@ bash scripts/deploy.sh \
 
 加载精简 checkpoint 时，服务读取运行目录中的配置、归一化统计和训练权重，从本机基础权重、共享缓存或 checkpoint 清单中的 HTTPS 地址取得冻结参数，并校验 SHA-256 后完成合并。WebSocket client 的请求格式不需要修改。
 
-相对 EEF checkpoint 的 PONG 同时标明训练目标是相对位姿、相对参考为该请求输入 state；服务端在进入同步/异步动作缓存前，将整段相对预测恢复成绝对 EEF20。WebSocket 返回的 action 仍是绝对位姿，state 缺失或维度错误时拒绝推理。绝对版 checkpoint 拒绝加载相对统计，反向也一样。
+相对 EEF checkpoint 始终在服务端做动作反归一化。默认 `inference.relative_action_output=absolute`：PONG 标明训练目标是相对位姿、相对参考为该请求输入 state，服务端在进入同步/异步动作缓存前把整段相对预测恢复成绝对 EEF20，WebSocket 返回绝对位姿。设为 `relative`（或 `--relative-action-output relative`）时跳过还原，下发物理单位的相对 EEF20，PONG 的 `action_target` 改为 `relative_pose`、`relative_actions_decoded_by=client`。两种模式都要求 obs 带正确的 20D 绝对 state。绝对版 checkpoint 拒绝加载相对统计，反向也一样；绝对模型不能开相对下发。
 
 异地部署可指定基础权重和缓存：
 

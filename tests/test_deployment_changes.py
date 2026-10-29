@@ -112,6 +112,7 @@ class TestDeploymentYaml:
         assert OmegaConf.select(cfg, "inference.inference_mode") == "sync"
         assert OmegaConf.select(cfg, "inference.inference_horizon") is None
         assert OmegaConf.select(cfg, "inference.inference_delay_steps") is None
+        assert OmegaConf.select(cfg, "inference.relative_action_output") == "absolute"
 
     def test_server_defaults_present(self):
         from omegaconf import OmegaConf
@@ -162,6 +163,7 @@ class TestDeployConfigLoading:
             "inference_mode",
             "inference_horizon",
             "inference_delay_steps",
+            "relative_action_output",
         ):
             setattr(args, attr, None)
         return args
@@ -191,6 +193,16 @@ class TestDeployConfigLoading:
 
         cfg = deploy._apply_inference_overrides(cfg, args)
         assert OmegaConf.select(cfg, "inference.denoise_steps") == 20
+
+    def test_cli_relative_action_output_override(self):
+        from omegaconf import OmegaConf
+
+        deploy = self._policy_server()
+        cfg = deploy._load_deploy_yaml()
+        args = self._blank_args()
+        args.relative_action_output = "relative"
+        cfg = deploy._apply_inference_overrides(cfg, args)
+        assert OmegaConf.select(cfg, "inference.relative_action_output") == "relative"
 
     def test_cli_schedule_overrides(self):
         from omegaconf import OmegaConf

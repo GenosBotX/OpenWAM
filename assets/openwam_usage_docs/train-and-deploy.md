@@ -268,6 +268,7 @@ inference:
   inference_mode: sync                 # sync execution or async prefetch
   inference_horizon: null              # actions consumed per chunk; null = full chunk
   inference_delay_steps: null          # async latency in action steps; < horizon
+  relative_action_output: absolute     # relative checkpoints: absolute reconstructs, relative sends unnormalized deltas
 ~~~
 
 With `num_frames: 33`, each generated action chunk contains 32 actions. `inference_horizon` only limits how many are consumed before the next generation.

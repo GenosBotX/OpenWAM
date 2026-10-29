@@ -165,3 +165,42 @@ def test_websocket_predict_and_handshake_return_absolute_actions(monkeypatch):
     assert pong["model_action_target"] == "relative_pose"
     assert pong["model_action_contract_id"] == "piper-x-relative-eef20-base-v1"
     assert pong["relative_actions_decoded_by"] == "server"
+
+
+def test_websocket_can_emit_unnormalized_relative_actions(monkeypatch):
+    from PIL import Image
+    from openwam.deploy.server import PolicyServer
+    engine, relative = make_engine(monkeypatch)
+    cfg = config()
+    cfg.inference.relative_action_output = "relative"
+    engine.cfg = cfg
+    server = PolicyServer(engine, cfg)
+    observation = {"state": pose(.4, .1, .2, -.3).tolist(), "prompt": "pick",
+        "images": {"head_camera": Image.new("RGB", (32, 32))}}
+    response = server.predict(observation)
+    np.testing.assert_allclose(response["action"][0], relative[0], atol=1e-6)
+    assert abs(response["action"][0][0] - .01) < 1e-6
+    pong = server._pong_payload()
+    assert pong["action_target"] == "relative_pose"
+    assert pong["model_action_target"] == "relative_pose"
+    assert pong["relative_actions_decoded_by"] == "client"
+
+
+def test_relative_wire_requires_relative_checkpoint(monkeypatch):
+    from openwam.deploy.server import PolicyServer
+    engine, _ = make_engine(monkeypatch)
+    cfg = config(False)
+    cfg.inference.relative_action_output = "relative"
+    engine.architecture.repr_contract = repr_contract_from_cfg(cfg)
+    engine.cfg = cfg
+    with pytest.raises(ValueError, match="relative-EEF"):
+        PolicyServer(engine, cfg)
+    with pytest.raises(ValueError, match="relative-EEF"):
+        engine.generate({"observation": {"state": pose(.4, .1, .2, -.3)}, "prompt": "pick"})
+
+
+def test_engine_emits_relative_chunk_when_configured(monkeypatch):
+    engine, relative = make_engine(monkeypatch)
+    engine.cfg.inference.relative_action_output = "relative"
+    out = engine.generate({"observation": {"state": pose(.4, .1, .2, -.3)}, "prompt": "pick"})
+    np.testing.assert_allclose(out["actions"], relative, atol=1e-6)

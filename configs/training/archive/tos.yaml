@@ -1,0 +1,10 @@
+# 训练结束后上传并验证最新 checkpoint、恢复 state 及附属文件。
+enabled: true
+root: ${oc.env:OPENWAM_EXPERIMENTS_TOS,tos://ml-platform-auto-created-required-2109640594-cn-beijing/experiments}
+path: null                  # 默认 日期/实验名称；也可指定相对路径或完整 tos:// URI
+local_root: /vePFS/tangyuting
+keep_local: false             # true: 上传并校验后仍保留本地实验
+credentials_file: ${oc.env:OPENWAM_TOS_CREDENTIALS,/vePFS/tangyuting/.config/openwam/tos-linglong.json}
+endpoint: ${oc.env:TOS_ENDPOINT,tos-cn-beijing.ivolces.com}
+workers: 4
+wait_timeout_s: 86400         # 非主 rank 等待归档结果；不使用长时间 NCCL collective

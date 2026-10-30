@@ -1,4 +1,48 @@
-> Linglong TOS adaptation: [bounded cache and training guide](assets/openwam_usage_docs/linglong_tos.md).
+> 训练与部署：[Linglong](assets/openwam_usage_docs/linglong.md) · [Piper-X](assets/openwam_usage_docs/piper_x.md)
+
+## 训练实验自动归档
+
+通用 Trainer 在正常完成训练后（包含达到 `max_steps`），等待所有 rank 和异步 checkpoint 保存结束，关闭本次训练日志，然后将最新 checkpoint、同一步的训练恢复 state、配置、归一化参数、tokenizer 等实验目录附属文件上传到 TOS。完整模型和精简 checkpoint 使用同一流程。`save_full_states_for_resume=false` 时没有恢复 state 可归档；`save_steps=0` 的无保存任务不归档。异常中断的训练不触发归档。
+
+默认根路径为 `tos://ml-platform-auto-created-required-2109640594-cn-beijing/experiments/`，后接 `日期/实验名称/`。日期沿用实验时间戳目录的日期，实验名称取其父目录名。每次归档写入独立的 `archives/<id>/`，同一天同名实验也不会覆盖已有模型。`LATEST.json` 指向该路径下最新归档；归档内的 `archive_manifest.json` 记录文件、step、大小和 CRC64，`ARCHIVE_COMPLETE.json` 表示上传及校验完成。旧 checkpoint 和旧恢复 state 不上传。
+
+只有全部文件上传、CRC64/大小复核、源文件未变化检查及远端完成标记校验通过后，才删除本次时间戳实验目录（含旧 checkpoint）。上传或校验失败时保留本地全部文件并让训练任务以错误退出。兄弟实验、代码、数据及公共基础模型不在清理范围。清理本身失败时也报错，已验证的 TOS 副本保留。归档记录保存在实验父目录的 `.tos_archives/`。
+
+所有使用 `scripts/train.py` 的训练命令均可直接追加以下参数，无需修改各本体配置：
+
+```bash
+# 默认：上传验证成功后删除本地
+bash scripts/piper/launch_volcano_piper_x_20261022_20261028_relative_eef_16gpu_e5.sh
+
+# 上传验证成功后仍保留本地
+bash scripts/piper/launch_volcano_piper_x_20261022_20261028_relative_eef_16gpu_e5.sh \
+  training.archive.keep_local=true
+
+# 不自动归档
+# 在训练命令末尾追加：training.archive.enabled=false
+```
+
+通过 `OPENWAM_EXPERIMENTS_TOS` 或 `training.archive.root` 可更换根路径。`training.archive.path` 用来替换默认的 `日期/实验名称`，支持根路径下的相对路径或完整 TOS 地址：
+
+```bash
+# 上传到默认根路径下的 tangyuting/piper_relative，再保留独立归档版本
+# 追加到原训练命令：
+training.archive.path=tangyuting/piper_relative
+
+# 指定完整目标路径，并保留本地实验
+training.archive.path=tos://ml-platform-auto-created-required-2109640594-cn-beijing/experiments/custom/piper_relative training.archive.keep_local=true
+```
+
+凭证复用 `TOS_ACCESS_KEY` / `TOS_SECRET_KEY` 环境变量，或 `OPENWAM_TOS_CREDENTIALS` 指定的外部 JSON 文件；密钥不写入归档清单。默认使用北京区 TOS 内网 endpoint，可通过 `TOS_ENDPOINT` 覆盖。首次使用需安装 `pip install -e '.[tos]'`。
+
+上传失败后，可针对已完成的本地实验重试（默认上传验证后清理；`--keep-local` 保留）：
+
+```bash
+python scripts/archive_experiment.py --run-dir /vePFS/tangyuting/OpenWAM-CUDAGraph/outputs/实验名/时间戳
+```
+
+恢复训练或推理时，从 `LATEST.json` 指向的归档目录下载最新 checkpoint 和所需附属文件；恢复训练还需下载同一步的 `accel_state_step_*`。精简 checkpoint 依旧依赖其 manifest 指定的公共基础权重，不会在归档中重复复制。
+
 
 <p align="center">
   <img src="assets/repo_images/openwam_title.png" alt="OpenWAM" width="60%">

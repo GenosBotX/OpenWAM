@@ -130,3 +130,21 @@ def test_disabled_async_writes_before_publish_returns(tmp_path: Path):
     assert (output / "accel_state_step_6" / "trainer_state.json").is_file()
     assert (output / "checkpoint_step_6.safetensors").is_file()
     publisher.close()
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_final_weights_preserve_same_step_completed_state(tmp_path, enabled):
+    publisher = _publisher(tmp_path, enabled=enabled)
+    output = tmp_path / "run"
+    output.mkdir()
+    arch = _Arch()
+    common = dict(resume_context=None, prune="rolling", keep_last_k=2)
+    publisher.publish(arch, str(output), 8, 4, 0, final=False, include_full_state=True, **common)
+    publisher.wait()
+    marker = output / "accel_state_step_8" / "trainer_state.json"
+    before = marker.read_bytes()
+    publisher.publish(arch, str(output), 8, 4, 0, final=True, include_full_state=False, **common)
+    publisher.wait()
+    assert marker.read_bytes() == before
+    assert (output / "accel_state_step_8" / "pytorch_model" / "shard.bin").exists()
+    publisher.close()

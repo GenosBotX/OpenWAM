@@ -1,3 +1,7 @@
+defaults:
+  - training/archive: tos
+  - _self_
+
 # Exact copy of the 2026-09-27_18-28-59 saved config, except dataset/output paths.
 # Keep original foundation initialization and saved 24->80 mapping.
 model:

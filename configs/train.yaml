@@ -1,4 +1,5 @@
 defaults:
+  - training/archive: tos
   - model: dual_system            # [Optional]: dual_system(default), single_system, tri_system
   - dataloader: robotwin          # [Optional]: robotwin(default), ebench, robocasa365, robocasa_gr1, robodojo, vlabench, libero, linglong
   - _self_

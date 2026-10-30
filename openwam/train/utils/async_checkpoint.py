@@ -167,7 +167,9 @@ class CheckpointPublisher:
     ) -> None:
         """Stage this step and return. The previous copy is finished first."""
         self.wait()
-        if self._is_main:
+        # Final weights may reuse a state already saved at this exact step.
+        # Only invalidate the marker when that state is actually being rewritten.
+        if self._is_main and include_full_state:
             marker = os.path.join(output_path, f"accel_state_step_{global_step}", "trainer_state.json")
             if os.path.exists(marker):
                 os.remove(marker)

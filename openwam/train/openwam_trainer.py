@@ -232,6 +232,10 @@ class OpenWAMTrainer:
         # construction (__init__, self-contained ckpt-dir path). Step stays 0.
 
         output_path, resume_state_dir = self.setup_output_dir(debug, resume_path)
+        from openwam.train.utils.experiment_archive import attach_training_log
+
+        if self.accelerator.is_main_process:
+            attach_training_log(output_path)
         self._checkpoint_overlay = None
         if resume_state_dir is None:
             self.configure_checkpoint_overlay(output_path)
@@ -817,3 +821,11 @@ class OpenWAMTrainer:
         self.accelerator.wait_for_everyone()
         if wandb_run is not None:
             wandb_run.finish()
+        archive_cfg = getattr(self.cfg.training, "archive", None)
+        if save_steps and archive_cfg is not None and archive_cfg.get("enabled", True):
+            from openwam.train.utils.experiment_archive import finish_archive
+
+            finish_archive(
+                output_path, archive_cfg, self.accelerator,
+                step=global_step, require_state=full_state,
+            )

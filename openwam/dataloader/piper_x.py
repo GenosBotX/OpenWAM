@@ -30,7 +30,7 @@ import torch
 from PIL import Image
 
 from openwam.dataloader.bases import BaseDataset
-from openwam.dataloader.tos_cache import BoundedTosCache, DatasetStorage, join_tos
+from openwam.dataloader.tos_cache import BoundedTosCache, DatasetStorage, join_tos, is_remote_path
 from openwam.dataloader.transforms.multiview import assemble_multiview_layout
 from openwam.dataloader.utils import get_cfg
 from openwam.dataloader.utils.normalization import ROT6D_DIMS_EEF20, apply_normalization, pin_rot6d_identity
@@ -134,14 +134,15 @@ class PiperXDataset(BaseDataset):
                 datasets.append(cls.from_config(sub, split=split))
             return PiperXCollection(datasets)
         raw_dir = str(configured)
-        remote = raw_dir.startswith("tos://")
+        remote = is_remote_path(raw_dir)
         dataset_dir = raw_dir if remote else Path(raw_dir)
         if split in ("test", "val"):
             evaluation_dir = get_cfg(config, "eval_dataset_dir", None)
             if evaluation_dir:
-                dataset_dir = str(evaluation_dir) if str(evaluation_dir).startswith("tos://") else Path(evaluation_dir)
+                dataset_dir = str(evaluation_dir) if is_remote_path(evaluation_dir) else Path(evaluation_dir)
             elif remote:
-                raise ValueError("TOS evaluation requires eval_dataset_dir")
+                raise ValueError("Remote evaluation requires eval_dataset_dir")
+        remote = is_remote_path(dataset_dir)
         if not remote and split in ("test", "val") and dataset_dir.name.endswith("_train_15hz"):
             candidate = dataset_dir.with_name(dataset_dir.name.replace("_train_15hz", "_test_15hz"))
             if candidate.is_dir():
@@ -208,9 +209,9 @@ class PiperXDataset(BaseDataset):
         cache_max_bytes=4*1024**3,
         cache_min_free_bytes=1024**3,
     ):
-        self._remote = str(dataset_dir).startswith("tos://")
+        self._remote = is_remote_path(dataset_dir)
         self.dataset_dir = str(dataset_dir) if self._remote else Path(dataset_dir)
-        needs_cache = self._remote or str(normalization_dataset_dir).startswith("tos://")
+        needs_cache = self._remote or is_remote_path(normalization_dataset_dir)
         self.tos_cache = BoundedTosCache(cache_dir, cache_max_bytes, cache_min_free_bytes) if needs_cache else None
         self._storage = DatasetStorage(self.dataset_dir, self.tos_cache)
         self.split = str(split)

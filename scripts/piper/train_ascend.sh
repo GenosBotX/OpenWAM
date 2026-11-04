@@ -3,7 +3,11 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 task_root="$(dirname "$repo_root")"
 export OPENWAM_REPO_ROOT="$repo_root"
-export OPENWAM_DATA_ROOT="${OPENWAM_DATA_ROOT:-$task_root/data/piperx/openwam}"
+export OPENWAM_DATA_ROOT="${OPENWAM_DATA_ROOT:-obs://genosbot-shanghai/openwam/data/piper-x}"
+export OPENWAM_OBS_ENDPOINT="${OPENWAM_OBS_ENDPOINT:-https://obs.cn-southwest-2.myhuaweicloud.com}"
+export OPENWAM_CACHE_DIR="${OPENWAM_CACHE_DIR:-/tmp/openwam-piper-obs-cache}"
+export OPENWAM_CACHE_MAX_BYTES="${OPENWAM_CACHE_MAX_BYTES:-4294967296}"
+export OPENWAM_CACHE_MIN_FREE_BYTES="${OPENWAM_CACHE_MIN_FREE_BYTES:-1073741824}"
 export OPENWAM_BASE_CHECKPOINT="${OPENWAM_BASE_CHECKPOINT:-$task_root/models/OpenWAM-Alpha-Real-RoboDojo-Piper-X/checkpoint_step_30000.safetensors}"
 export OPENWAM_WAN_MODEL_DIR="${OPENWAM_WAN_MODEL_DIR:-/home/ma-user/work/customer-test/OpenWAM-main/assets/video_backbone_ckpt/Wan2.2-TI2V-5B}"
 # Reuse the runtime of customer-test/openwam/epoch_foundation.sh.
@@ -112,23 +116,15 @@ require_dir() {
 
 require_file "$python_bin"
 require_dir "$OPENWAM_REPO_ROOT"
-require_dir "$OPENWAM_DATA_ROOT"
 require_file "$OPENWAM_BASE_CHECKPOINT"
 require_file "${OPENWAM_BASE_CHECKPOINT%/*}/config.yaml"
 require_dir "${OPENWAM_BASE_CHECKPOINT%/*}/tokenizer/google/umt5-xxl"
 require_dir "$OPENWAM_WAN_MODEL_DIR"
 require_file "$OPENWAM_WAN_MODEL_DIR/diffusion_pytorch_model.safetensors.index.json"
 require_file "$OPENWAM_WAN_MODEL_DIR/Wan2.2_VAE.pth"
-for split in \
-  20261022_eef_v1/train 20261023_eef_v1/train 20261024_eef_v1/train \
-  20261026_eef_v2/train 20261026_static_eef_v2/train \
-  20261027_eef_v1/train 20261027_static_eef_v1/train \
-  20261022_eef_v1/test 20261023_eef_v1/test 20261024_eef_v1/test \
-  20261026_eef_v2/test 20261026_static_eef_v2/test \
-  20261027_eef_v1/test 20261027_static_eef_v1/test; do
-  require_dir "$OPENWAM_DATA_ROOT/$split"
-done
-require_file "$OPENWAM_DATA_ROOT/20261022_20261027_normalization_v1/meta/eef20_normalization_stats.json"
+# Use the training reader for both local overrides and OBS access checks.
+# This checks every split and shared statistics without mirroring the dataset.
+"$python_bin" -m openwam.dataloader.piper_obs_preflight
 
 if [[ "${OPENWAM_PREFLIGHT_ONLY:-0}" == 1 ]]; then
   echo "Piper-X Ascend preflight passed"

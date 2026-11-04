@@ -1,4 +1,5 @@
-> Linglong TOS adaptation: [bounded cache and training guide](assets/openwam_usage_docs/linglong_tos.md).
+> Huawei Cloud Piper-X OBS training: [data, bounded cache, and multi-node training guide](assets/openwam_usage_docs/piper_x.md).
+> Linglong TOS training: [bounded cache and training guide](assets/openwam_usage_docs/linglong_tos.md).
 
 <p align="center">
   <img src="assets/repo_images/openwam_title.png" alt="OpenWAM" width="60%">

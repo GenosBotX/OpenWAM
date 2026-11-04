@@ -1,4 +1,4 @@
-"""Process-safe, byte-bounded TOS file cache (Linux local disk only).
+"""Process-safe, byte-bounded object file cache (Linux local disk only).
 
 Dataset prefixes must be immutable. All ranks on a node use the same cache
 directory and limits. File leases protect readers from concurrent eviction;
@@ -20,6 +20,45 @@ import sqlite3
 import time
 import threading
 from urllib.parse import urlsplit
+
+
+def is_remote_path(path):
+    return str(path).startswith(("tos://", "obs://"))
+
+
+def parse_object_uri(uri):
+    parsed = urlsplit(str(uri))
+    if (parsed.scheme not in ("tos", "obs") or not parsed.netloc
+            or parsed.query or parsed.fragment or parsed.username or parsed.password
+            or "\\" in str(uri)):
+        raise ValueError(f"Expected tos://bucket/key or obs://bucket/key, got {uri!r}")
+    key = parsed.path.lstrip("/").rstrip("/")
+    if any(p in (".", "..") for p in key.split("/")):
+        raise ValueError("Object paths cannot contain dot components")
+    return parsed.scheme, parsed.netloc, key
+
+
+class ObjectStorageBackend:
+    """Route each URI independently; keep existing TOS configurations working."""
+
+    def __init__(self):
+        self._backends = {}
+
+    def _backend(self, uri):
+        scheme, _, _ = parse_object_uri(uri)
+        if scheme not in self._backends:
+            if scheme == "obs":
+                from openwam.dataloader.obs_backend import ObsBackend
+                self._backends[scheme] = ObsBackend()
+            else:
+                self._backends[scheme] = TosBackend()
+        return self._backends[scheme]
+
+    def head(self, uri):
+        return self._backend(uri).head(uri)
+
+    def download(self, uri, destination, etag):
+        return self._backend(uri).download(uri, destination, etag)
 
 
 def parse_tos_uri(uri):
@@ -154,7 +193,7 @@ class BoundedTosCache:
             raise ValueError("Cache max_bytes must be positive, min_free_bytes nonnegative")
         self.root.mkdir(parents=True, exist_ok=True)
         (self.root / "locks").mkdir(exist_ok=True)
-        self.backend = backend or TosBackend()
+        self.backend = backend or ObjectStorageBackend()
         self._db = None
         self._db_owner = None
         # A single cross-process lock protects the index and quota reservations.
@@ -263,7 +302,7 @@ class BoundedTosCache:
 
     @contextlib.contextmanager
     def open(self, uri):
-        parse_tos_uri(uri)
+        parse_object_uri(uri)
         identity = hashlib.sha256(str(uri).encode()).hexdigest()
         data = self.root / (identity + ".data")
         partial = self.root / (identity + ".part")
@@ -288,7 +327,7 @@ class BoundedTosCache:
                 try:
                     self.backend.download(uri, partial, etag)
                     if partial.stat().st_size != size:
-                        raise IOError("Incomplete TOS download")
+                        raise IOError("Incomplete object download")
                     os.replace(partial, data)
                     with self._index() as db:
                         db.execute("UPDATE entries SET ready=1,atime=? WHERE id=?", (time.time(), identity))
@@ -317,16 +356,16 @@ class BoundedTosCache:
 
 
 class DatasetStorage:
-    """Local paths and TOS objects share the same scoped file interface."""
+    """Local paths, TOS and OBS objects share the same scoped file interface."""
 
     def __init__(self, root, cache=None):
         self.root = str(root)
-        self.remote = self.root.startswith("tos://")
+        self.remote = is_remote_path(self.root)
         self.cache = cache
         if self.remote:
-            parse_tos_uri(self.root)
+            parse_object_uri(self.root)
             if cache is None:
-                raise ValueError("TOS storage requires a bounded cache")
+                raise ValueError("Remote storage requires a bounded cache")
 
     @contextlib.contextmanager
     def open(self, relative):

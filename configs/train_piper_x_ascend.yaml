@@ -1,4 +1,4 @@
-# Matches the saved 2026-10-27_17-48-18 run; local immutable data mirror.
+# Matches the saved 2026-10-27_17-48-18 run; immutable OBS dataset with bounded per-node cache.
 defaults:
   - train_piper_x_20261022_20261027_tos_eef_16gpu_e5
   - _self_
@@ -12,23 +12,26 @@ model:
       model_path: ${oc.env:OPENWAM_WAN_MODEL_DIR,/home/ma-user/work/customer-test/OpenWAM-main/assets/video_backbone_ckpt/Wan2.2-TI2V-5B}
 
 dataloader:
+  cache_dir: ${oc.env:OPENWAM_CACHE_DIR,/tmp/openwam-piper-obs-cache}
+  cache_max_bytes: ${oc.env:OPENWAM_CACHE_MAX_BYTES,4294967296}
+  cache_min_free_bytes: ${oc.env:OPENWAM_CACHE_MIN_FREE_BYTES,1073741824}
   dataset_dir:
-    - ${oc.env:OPENWAM_DATA_ROOT}/20261022_eef_v1/train
-    - ${oc.env:OPENWAM_DATA_ROOT}/20261023_eef_v1/train
-    - ${oc.env:OPENWAM_DATA_ROOT}/20261024_eef_v1/train
-    - ${oc.env:OPENWAM_DATA_ROOT}/20261026_eef_v2/train
-    - ${oc.env:OPENWAM_DATA_ROOT}/20261026_static_eef_v2/train
-    - ${oc.env:OPENWAM_DATA_ROOT}/20261027_eef_v1/train
-    - ${oc.env:OPENWAM_DATA_ROOT}/20261027_static_eef_v1/train
+    - ${oc.env:OPENWAM_DATA_ROOT,obs://genosbot-shanghai/openwam/data/piper-x}/20261022_eef_v1/train
+    - ${oc.env:OPENWAM_DATA_ROOT,obs://genosbot-shanghai/openwam/data/piper-x}/20261023_eef_v1/train
+    - ${oc.env:OPENWAM_DATA_ROOT,obs://genosbot-shanghai/openwam/data/piper-x}/20261024_eef_v1/train
+    - ${oc.env:OPENWAM_DATA_ROOT,obs://genosbot-shanghai/openwam/data/piper-x}/20261026_eef_v2/train
+    - ${oc.env:OPENWAM_DATA_ROOT,obs://genosbot-shanghai/openwam/data/piper-x}/20261026_static_eef_v2/train
+    - ${oc.env:OPENWAM_DATA_ROOT,obs://genosbot-shanghai/openwam/data/piper-x}/20261027_eef_v1/train
+    - ${oc.env:OPENWAM_DATA_ROOT,obs://genosbot-shanghai/openwam/data/piper-x}/20261027_static_eef_v1/train
   eval_dataset_dir:
-    - ${oc.env:OPENWAM_DATA_ROOT}/20261022_eef_v1/test
-    - ${oc.env:OPENWAM_DATA_ROOT}/20261023_eef_v1/test
-    - ${oc.env:OPENWAM_DATA_ROOT}/20261024_eef_v1/test
-    - ${oc.env:OPENWAM_DATA_ROOT}/20261026_eef_v2/test
-    - ${oc.env:OPENWAM_DATA_ROOT}/20261026_static_eef_v2/test
-    - ${oc.env:OPENWAM_DATA_ROOT}/20261027_eef_v1/test
-    - ${oc.env:OPENWAM_DATA_ROOT}/20261027_static_eef_v1/test
-  normalization_dataset_dir: ${oc.env:OPENWAM_DATA_ROOT}/20261022_20261027_normalization_v1
+    - ${oc.env:OPENWAM_DATA_ROOT,obs://genosbot-shanghai/openwam/data/piper-x}/20261022_eef_v1/test
+    - ${oc.env:OPENWAM_DATA_ROOT,obs://genosbot-shanghai/openwam/data/piper-x}/20261023_eef_v1/test
+    - ${oc.env:OPENWAM_DATA_ROOT,obs://genosbot-shanghai/openwam/data/piper-x}/20261024_eef_v1/test
+    - ${oc.env:OPENWAM_DATA_ROOT,obs://genosbot-shanghai/openwam/data/piper-x}/20261026_eef_v2/test
+    - ${oc.env:OPENWAM_DATA_ROOT,obs://genosbot-shanghai/openwam/data/piper-x}/20261026_static_eef_v2/test
+    - ${oc.env:OPENWAM_DATA_ROOT,obs://genosbot-shanghai/openwam/data/piper-x}/20261027_eef_v1/test
+    - ${oc.env:OPENWAM_DATA_ROOT,obs://genosbot-shanghai/openwam/data/piper-x}/20261027_static_eef_v1/test
+  normalization_dataset_dir: ${oc.env:OPENWAM_DATA_ROOT,obs://genosbot-shanghai/openwam/data/piper-x}/20261022_20261027_normalization_v1
 training:
   finetune_ckpt_path: ${oc.env:OPENWAM_BASE_CHECKPOINT}
   checkpoint_base_path: ${oc.env:OPENWAM_BASE_CHECKPOINT}

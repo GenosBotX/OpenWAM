@@ -1504,8 +1504,10 @@ class BaseWAMArchitecture(ABC, nn.Module):
         if rtc_lengths:
             if prefix_len not in rtc_lengths or prefix_len >= action_num_frames - 1:
                 raise ValueError(f"Unsupported RTC prefix length {prefix_len}; trained lengths: {rtc_lengths}")
-            # Cached velocities do not represent per-token clean-prefix conditioning.
-            dit_cache = None
+            # A request has fixed prefix/state conditions. Reuse velocities only
+            # within that request; every request needs its own first forwards.
+            if dit_cache is not None:
+                dit_cache.reset()
 
         # CFG knobs ARE forwarded so a CFG-capable backbone (CosmosPredict25)
         # can materialise ``inputs_shared['uncond_context']`` from its own
@@ -1575,6 +1577,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         inactive_action_dims = self._resolve_inactive_action_dims(active_action_mask, device)
         rtc_prefix_mask = None
         rtc_prefix_values = None
+        rtc_cache_action_mask = None
         if rtc_lengths:
             rtc_prefix_mask = torch.arange(action_num_frames - 1, device=device)[None, :] < prefix_len
             rtc_prefix_values = torch.zeros_like(action_latents)
@@ -1583,6 +1586,10 @@ class BaseWAMArchitecture(ABC, nn.Module):
                     raise ValueError("RTC prefix inactive action dimensions must be zero")
                 rtc_prefix_values[:, :prefix_len] = action_prefix
             action_latents = torch.where(rtc_prefix_mask.unsqueeze(-1), rtc_prefix_values, action_latents)
+            rtc_cache_action_mask = (~rtc_prefix_mask).unsqueeze(-1).expand_as(action_latents)
+            if inactive_action_dims is not None:
+                rtc_cache_action_mask = rtc_cache_action_mask.clone()
+                rtc_cache_action_mask[..., inactive_action_dims] = False
 
         num_train_ts_v = float(self.video_scheduler.num_train_timesteps)
         num_train_ts_a = float(self.action_scheduler.num_train_timesteps)
@@ -1616,7 +1623,8 @@ class BaseWAMArchitecture(ABC, nn.Module):
             if (
                 dit_cache is not None
                 and video_stepping
-                and not dit_cache.should_recompute(sigma_v, require_action=action_stepping)
+                and not dit_cache.should_recompute(sigma_v, require_action=action_stepping,
+                    **({"action_mask": rtc_cache_action_mask} if rtc_lengths else {}))
             ):
                 # Reuse cached predictions from the previous joint forward.
                 # Joint denoising can only skip the whole DiT call when the

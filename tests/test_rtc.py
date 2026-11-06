@@ -111,6 +111,7 @@ def test_d0_per_token_time_equals_legacy_mot_time():
 @pytest.mark.parametrize('delay', DEFAULT_PREFIX_LENGTHS)
 def test_generate_pins_prefix_every_step_and_preserves_inactive_noise(delay, monkeypatch):
     from tests.test_wam_architecture import _make_inactive_dim_probe_arch, _PIN_ACTIVE_IDX, _PIN_INACTIVE_IDX
+    from openwam.deploy.optimizations.dit_cache import DiTVelocityCache
     monkeypatch.setattr(torch.compiler, 'cudagraph_mark_step_begin', lambda: None)
     arch = _make_inactive_dim_probe_arch()
     arch.rtc_prefix_lengths = DEFAULT_PREFIX_LENGTHS
@@ -126,7 +127,7 @@ def test_generate_pins_prefix_every_step_and_preserves_inactive_noise(delay, mon
     mask[_PIN_ACTIVE_IDX] = True
     result = arch.generate(schedule=[(1000.,1000.),(500.,1000.),(0.,0.)],prompt='',
                            num_frames=33,action_prefix=prefix,active_action_mask=mask,
-                           dit_cache=object(),decode_video=False)
+                           dit_cache=DiTVelocityCache(),decode_video=False)
     for seen,time in zip(arch.seen_action_inputs,times):
         torch.testing.assert_close(seen[0,:delay],prefix,atol=0,rtol=0)
         assert time.shape == (1,32)
@@ -134,6 +135,36 @@ def test_generate_pins_prefix_every_step_and_preserves_inactive_noise(delay, mon
         assert (time[:,delay:] == 1000).all()
     np.testing.assert_array_equal(result['actions'][:delay],prefix.numpy())
     assert (result['actions'][:,_PIN_INACTIVE_IDX] == 0).all()
+
+
+@pytest.mark.parametrize('delay', DEFAULT_PREFIX_LENGTHS)
+def test_cached_rtc_skips_forwards_and_resets_between_changed_requests(delay, monkeypatch):
+    from tests.test_wam_architecture import _make_inactive_dim_probe_arch, _PIN_ACTIVE_IDX, _PIN_INACTIVE_IDX
+    from openwam.deploy.optimizations.dit_cache import DiTVelocityCache
+    monkeypatch.setattr(torch.compiler, 'cudagraph_mark_step_begin', lambda: None)
+    arch = _make_inactive_dim_probe_arch()
+    arch.rtc_prefix_lengths = DEFAULT_PREFIX_LENGTHS
+    cache = DiTVelocityCache()
+    mask = torch.zeros(8, dtype=torch.bool)
+    mask[_PIN_ACTIVE_IDX] = True
+    kwargs = dict(schedule=[(1000.-i*200, 1000.-i*200) for i in range(6)],
+                  prompt='', num_frames=33, decode_video=False, active_action_mask=mask)
+    # Same cache object survives changed d, prefix values and random seeds.
+    for d, value, seed in ((delay, .35, 7), (12 if delay != 12 else 6, -.25, 19)):
+        prefix = torch.zeros(d, 8)
+        prefix[:, _PIN_ACTIVE_IDX] = value
+        arch.seen_action_inputs.clear()
+        cached = arch.generate(**kwargs, action_prefix=prefix, seed=seed, dit_cache=cache)['actions']
+        assert cache.stats['total_steps'] == 5
+        assert cache.stats['total_skips'] == 3
+        assert len(arch.seen_action_inputs) == 2
+        for seen in arch.seen_action_inputs:
+            torch.testing.assert_close(seen[0, :d], prefix, atol=0, rtol=0)
+        np.testing.assert_array_equal(cached[:d], prefix.numpy())
+        assert (cached[:, _PIN_INACTIVE_IDX] == 0).all()
+        plain = arch.generate(**kwargs, action_prefix=prefix, seed=seed)['actions']
+        # Constant-flow oracle: skipping must be exact here, not only close.
+        np.testing.assert_array_equal(cached, plain)
 
 
 def test_inference_rejects_old_checkpoint_and_untrained_length():

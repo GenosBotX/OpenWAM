@@ -1,6 +1,7 @@
 """Tests for DiT velocity caching."""
 
 import torch
+import pytest
 
 from openwam.deploy.optimizations.dit_cache import DiTVelocityCache
 
@@ -143,3 +144,45 @@ def test_stats():
     stats = cache.stats
     assert stats["total_steps"] == 3
     assert stats["total_skips"] == 1
+
+
+def test_rtc_prefix_and_unused_channels_cannot_hide_divergent_suffix():
+    cache = DiTVelocityCache(cosine_threshold=.99)
+    video = torch.ones(1, 4)
+    first = torch.full((1, 32, 80), 1000.)
+    second = first.clone()
+    mask = torch.zeros_like(first, dtype=torch.bool)
+    mask[:, 12:, [0, 2, 34, 36]] = True
+    first[mask] = 1.
+    second[mask] = -1.
+    cache.update(video, .9, first)
+    cache.update(video, .8, second)
+    assert cache.should_recompute(.7, require_action=True, action_mask=mask)
+    # The old full-vector comparison would have accepted this cache hit.
+    assert not cache.should_recompute(.7, require_action=True)
+
+
+def test_rtc_cache_ignores_changed_frozen_prefix_and_inactive_channels():
+    cache = DiTVelocityCache()
+    video = torch.ones(1, 4)
+    first = torch.ones(1, 32, 80)
+    mask = torch.zeros_like(first, dtype=torch.bool)
+    mask[:, 6:, [0, 34]] = True
+    second = torch.where(mask, first, -first * 1000)
+    cache.update(video, .9, first)
+    cache.update(video, .8, second)
+    assert not cache.should_recompute(.7, require_action=True, action_mask=mask)
+
+
+def test_empty_or_nonfinite_rtc_comparison_recomputes():
+    cache = DiTVelocityCache()
+    video = torch.ones(1, 4)
+    a = torch.ones(1, 32, 20)
+    cache.update(video, .9, a)
+    cache.update(video, .8, a)
+    assert cache.should_recompute(.7, require_action=True, action_mask=torch.zeros_like(a, dtype=torch.bool))
+    with pytest.raises(ValueError, match='boolean'):
+        cache.should_recompute(.7, require_action=True, action_mask=torch.ones_like(a))
+    a[:, 12:] = float('nan')
+    cache.update(video, .7, a)
+    assert cache.should_recompute(.6, require_action=True, action_mask=torch.ones_like(a, dtype=torch.bool))

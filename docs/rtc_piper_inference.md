@@ -1,6 +1,6 @@
 # RTC 接入修订方案：按 playback=4 的现场日志确定边界
 
-更新：2026-11-06。本版替代 V1/V2 的倍速和 d 起点建议。固定目标为 `replan=0, alpha=0.55, phase_align=true, phase_steps=0, playback=4`，支持 direct/substeps/segment。未运行模型或机械臂，客户端仍待实现；本次完成训练分支整理、云端协议补充及既有日志离线审计。
+更新：2026-11-06。本版替代 V1/V2 的倍速和 d 起点建议。固定目标为 `replan=0, alpha=0.55, phase_align=true, phase_steps=0, playback=4`，支持 direct/substeps/segment。客户端已在 `lq/async_traj_smooth_rtc` 的 `b5bd998` 完成接入并通过离线测试。云端支持后缀感知 DiT cache；尚未加载完整 RTC checkpoint 做 GPU 精度/性能验收，未运行机械臂。
 
 ## 1. 前缀与 state 的准确含义
 
@@ -80,7 +80,7 @@ segment 还有关键差异：配对计算“记录接管→首次实际下发”
 
 32步名义队列长度约533ms，索引31对应约517ms；索引原点和首次下发相位还影响边界。四倍播放不改变训练时数据的物理时间分布，动作压缩与原生15Hz训练之间的时序差异仍需实机验证。
 
-首版建议稳态先设 **d=12**，d0用于冷启动及显式无前缀对照；同时保留每请求动态 d，集合仍为 `{0,6,...,12}`。在线使用每个模式最近的完整“观测→可执行边界”样本估计 d（可配置 P80+一 tick、带滞回），受训练集合和可用旧命令数限制。当前 k 的 P80 为15–16，估计器大多数时候会饱和到12，必须记 `coverage_overflow`。不要承诺动态 d 能解决当前训练覆盖不足，也不要外推尚未存在的旧动作凑够12；不足最小非零6时使用明确的 d0重规划/恢复。
+首版建议稳态先设 **d=12**，d0用于冷启动及显式无前缀对照；同时保留每请求动态 d，集合仍为 `{0,6,...,12}`。在线使用当前运行内每个模式最近的完整“观测→可执行边界”样本估计 d（可配置 P80+一 tick、带滞回），受训练集合和可用旧命令数限制。当前 k 的 P80 为15–16，估计器大多数时候会饱和到12，必须记 `coverage_overflow`。不要承诺动态 d 能解决当前训练覆盖不足，也不要外推尚未存在的旧动作凑够12；不足最小非零6时使用明确的 d0重规划/恢复。
 
 真实未来耗时事前未知：d 来自历史实测及当前 sender 状态的预测；结果到达后再用这次真实时间算 k。一条生成请求内不能事后把 d12 改成 d16；新请求才可改 d。本次先不扩大训练参数或发未经训练的 d13以上。
 
@@ -101,10 +101,10 @@ direct 使用当前命令节拍；substeps保存 joint 子命令及夹爪阶段�
 
 prefix 不足、计划版本失效、重连、人工接管、SDK部分成功、超时等应有明确恢复分支。相位补偿只能做一次；延迟估计要剔除由选择 d 本身导致的承诺等待，防止自增反馈。有限 horizon 无法保证无限网络断流时继续有效运动。
 
-## 6. 下一步实现和验收
+## 6. 客户端实现状态和验收
 
-1. 在客户端 `lq/async_traj_smooth_rtc` 贯通新PONG、prefix请求、上下文检查与三类sender命令时间视图；目前该分支已建立，客户端实现尚未完成。
-2. 实现d/k分离、早到未来安装、迟到接续、alpha/夹爪规则、日志及恢复；按实际发送边界复核segment相位，不能直接复制旧RTC路径。
+1. 客户端已贯通新 PONG、prefix 请求、上下文检查、d/k 分离、三类 sender 的接续及诊断日志。
+2. 实现传入的是 alpha 融合后的已承诺逻辑 EEF 端点，尚未实现严格按墙钟时间重采样的物理命令带。substeps/segment 会拉长时间，不能将端点前缀等同于均匀物理时间前缀；这是当前适配的已知限制。
 3. 离线注入延迟测试k<d/k=d/d<k<32/k>=32、活动substep/segment、prefix不足、版本失效与中断。先核对前缀采样和限速，再做shadow。
 4. 在GPU验证同一RTC权重d0与d12、变化state/prefix/d及各优化开关；重测完整链路后再决定是否补训更长prefix/horizon。
 5. 三种模式保持playback4、alpha.55等现有设置对比接缝、夹爪事件、停顿和任务成功率；实机运行由用户现场执行。
@@ -118,3 +118,61 @@ prefix 不足、计划版本失效、重连、人工接管、SDK部分成功、�
 /path/to/rtc_checkpoint 是占位路径，须包含对应 config.yaml、normalization_stats.npy、权重及所需 tokenizer/base model。该功能配置尚未进行完整模型 GPU 性能验收。现有已优化服务不能只换权重后就假定支持 RTC。
 
 日志审计文件同步到仓库 analysis/rtc_inference_20261106/latency/（本地分析产物，不纳入代码提交）。
+
+
+## 7. RTC 与 DiT velocity cache 的兼容
+
+此前 `openwam/model/architectures/base.py` 在 RTC 分支直接执行 `dit_cache = None` 是适配阶段的保守实现，并非训练 RTC 的理论要求。本版移除此限制。CFG scale>1 原有禁用规则仍在；当前 5 步配置使用默认 CFG scale=1。
+
+- 每个请求开始清空 cache；prefix/state/d/prompt 改变后重新计算最初的两次预测，不跨请求复用速度。
+- 请求内部同时缓存 video/action 的 flow velocity；只在视频预测和有效动作后缀预测都满足余弦阈值时跳过联合 DiT forward。动作比较排除冻结 prefix 和 80D 中未使用的通道，避免这些通道掩盖后缀变化。
+- 每个去噪步骤仍把 prefix 钳制回原值，prefix action timestep 仍为零。复用速度不会解除 RTC 条件。
+- 这是近似加速。余弦相似度不约束幅值；即使 prefix 保持不变，suffix 也可能偏离 cache-off。0.99 阈值不代表误差低于 1%。5 步最多可由两次真实 forward 加三次复用完成，但命中率和总耗时需要实测，不能把理论上限当实测值。
+
+优化配置 `configs/deploy_piper_x_rtc_fp8_5step.yaml` 保留 FP8、compile、CUDA Graph，画布 384×320，cache threshold=0.99、max_skips=3。旧 `deploy_piper_x_rtc.yaml` 保留作无优化正确性参考。
+
+4090 独立目录完整后，使用原 FP8 环境启动：
+
+```bash
+cd /home/zhuoyu/liqi/OpenWAM-rtc
+export OPENWAM_REPO_ROOT="$PWD"
+export OPENWAM_BASE_CHECKPOINT=/home/zhuoyu/piper-x/OpenWAM-Alpha-Real-RoboDojo-Piper-X/checkpoint_step_30000.safetensors
+/home/zhuoyu/tangyuting/envs/openwam-fp8/bin/python -u scripts/deploy.py \
+  --config configs/deploy_piper_x_rtc_fp8_5step.yaml \
+  --ckpt-dir /home/zhuoyu/liqi/ckpt/1106_rtc_based_0020 \
+  --ckpt-name checkpoint_step_14525.safetensors \
+  --device cuda:0 --host 0.0.0.0 --port 8848
+```
+
+也可继续用原 `configs/deploy_fp8_5step.yaml` 加 `inference.height=384 inference.width=320`，无需新增 cache 开关。客户端命令及 `--trained-rtc` 不变。
+
+## 8. 测缓存造成的输出偏差
+
+新增 `scripts/eval_rtc_cache.py` 离线加载一个模型，不连接机械臂或 WebSocket 服务。对于同一记录的 observation/state/prefix、同一 checkpoint、同一 seed，分别执行 cache-off、cache-off-repeat、cache-on；重复与交替测量顺序，用 CUDA synchronize 覆盖异步 GPU 执行。FP8/compile/CUDA Graph 在三组保持一致，因此隔离的是 DiT cache 的增量影响，不是 BF16 与 FP8 的差异。
+
+```bash
+/home/zhuoyu/tangyuting/envs/openwam-fp8/bin/python -u scripts/eval_rtc_cache.py \
+  --config configs/deploy_piper_x_rtc_fp8_5step.yaml \
+  --ckpt-dir /home/zhuoyu/liqi/ckpt/1106_rtc_based_0020 \
+  --ckpt-name checkpoint_step_14525.safetensors \
+  --request-json /path/to/rtc_inputs/000123/request.json \
+  --prefix-lengths 0 6 7 8 9 10 11 12 \
+  --seeds 42 43 44 --repeats 3 --warmup 1 \
+  --cosine-threshold 0.99 --max-skips 3 \
+  --output-dir analysis/rtc_cache_replay_001
+```
+
+请求路径应替换为客户端 `--record-dir` 保存的真实 `request.json`；遍历全部八种 d 时，所选请求必须已记录至少 12 条合法承诺 prefix。程序只能截短，不补造未来命令。不指定 `--prefix-lengths` 则保持记录的 d；旧非 RTC 记录只可测 d=0。应选不同任务阶段/运动幅度/夹爪事件的多个请求（`--request-json` 支持多个文件），不可只用一个静止样本推断整体精度。
+
+输出 `manifest.json` 记录代码版本、配置、硬件；`results.jsonl` 和 `summary.json` 报告：
+
+- 同种子缓存开关的双臂 suffix TCP 位置误差（mm）、旋转测地误差（度）、夹爪比例误差和 0.5 阈值翻转率；单独报告首个 suffix 点和逐步位置增量偏差。
+- cache-off 重复执行的偏差，用以识别计算非确定性。
+- 推理引擎端 P50/P95、配对加速比、跳步率；不含网络、客户端和执行器等待，不可当作端到端延迟。
+- 每组 NPZ 保存 off/off_repeat/on 的完整动作；物理 prefix 必须精确一致，否则中止报告。
+
+这里测到的是相对无缓存输出的数值变化，不是有真值的预测 loss，也不是任务成功率。后者应保持 playback4、alpha.55、phase-align 等参数一致，现场比较回撤/抖动、接缝、任务成功率和完整延迟。若 0.99/3 偏差过大，测 0.995/2、0.999/1 等更保守的缓存配置并比较实测速度，再选可接受的折中，不默认牺牲全部缓存加速。
+
+客户端 P80 从当前进程当前执行阶段在线累计的最近 64 个有效延迟样本计算，重启清空；不自动读取以前日志。历史日志只用于设计参数起点。前缀长度仍受训练集合及现有队列约束。
+
+本次 CPU 回归：185 passed、1 skipped（需要 CUDA）、1 deselected。排除的 `test_dual_system_joint_self_attn_compile_auto_sets_mot_loop` 在未修改的 `8bdb571` 上也失败：它断言 torch.compile 调用一次，而已有代码对联合循环和 request-context KV 分别编译，共两次；不是此次 cache 改动引入。缓存测试覆盖全部八种 d、真实跳过 forward、每步 prefix 固定、跨请求清空，以及物理误差单位和配对测量隔离。这些检查不替代完整 checkpoint 的 GPU 验收。

@@ -1,0 +1,41 @@
+# RTC optimized deployment: clean prefix, suffix-aware DiT velocity cache.
+# Keep FP8/compile/CUDA Graph enabled; validate real checkpoint replay on GPU.
+# This preset is approximate (FP8 + DiT cache + 5 denoising steps).
+checkpoint_path: null
+device: cuda:0
+server:
+  host: "0.0.0.0"
+  port: 8848
+inference:
+  action_response_mode: chunk
+  denoise_steps: 5
+  denoise_mode: sync
+  inference_mode: sync
+  num_frames: 33
+  video_num_frames: 9
+  height: 384
+  width: 320
+optimization:
+  decode_video: false
+  video_fp8:
+    enabled: true
+  dit_cache:
+    enabled: true
+    cosine_threshold: 0.99
+    max_skips: 3
+  prompt_embed_cache:
+    enabled: true
+    maxsize: 32
+  compile:
+    enabled: true
+    required: true
+    self_attn:
+      enabled: true
+      torch_mode: default
+      dynamic: false
+      cuda_graph:
+        enabled: true
+    wan_blocks:
+      enabled: true
+      torch_mode: default
+      dynamic: false

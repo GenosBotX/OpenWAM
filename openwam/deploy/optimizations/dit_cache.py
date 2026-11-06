@@ -60,7 +60,8 @@ class DiTVelocityCache:
         self._total_skips: int = 0
         self._total_steps: int = 0
 
-    def should_recompute(self, current_sigma: float, *, require_action: bool = False) -> bool:
+    def should_recompute(self, current_sigma: float, *, require_action: bool = False,
+                         action_mask: Optional[Tensor] = None) -> bool:
         """Decide whether to run the DiT forward pass or reuse cache.
 
         Args:
@@ -68,6 +69,10 @@ class DiTVelocityCache:
             require_action: Whether the caller also needs a cached action
                 prediction. Joint video/action denoising can only skip a full
                 forward when both streams have cached predictions.
+            action_mask: Optional boolean mask broadcastable to the action
+                velocity. RTC compares only the unfrozen, represented suffix;
+                clean prefix and unused unified-action channels cannot vote
+                for a cache hit. An empty comparison always recomputes.
 
         Returns:
             True if the DiT should be run, False if cache can be reused.
@@ -91,10 +96,18 @@ class DiTVelocityCache:
             return True
 
         if require_action:
-            a1 = self._prev_action_velocity.flatten().float()
-            a2 = self._cached_action_velocity.flatten().float()
+            a1 = self._prev_action_velocity
+            a2 = self._cached_action_velocity
+            if action_mask is not None:
+                if action_mask.dtype != torch.bool:
+                    raise ValueError("action_mask must be boolean")
+                mask = torch.broadcast_to(action_mask, a2.shape)
+                a1, a2 = a1.masked_select(mask), a2.masked_select(mask)
+                if a2.numel() == 0:
+                    return True
+            a1, a2 = a1.flatten().float(), a2.flatten().float()
             action_cos_sim = torch.nn.functional.cosine_similarity(a1.unsqueeze(0), a2.unsqueeze(0))
-            if action_cos_sim.item() < self.cosine_threshold:
+            if not bool(torch.isfinite(action_cos_sim).all()) or action_cos_sim.item() < self.cosine_threshold:
                 return True
 
         self._consecutive_skips += 1

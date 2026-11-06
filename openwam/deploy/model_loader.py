@@ -205,6 +205,10 @@ def load_from_checkpoint_dir(
     # 4. The architecture loader recognizes both full weights and trainable
     # overlays. Inference and WebSocket serving deliberately share this path.
     architecture.load_checkpoint(ckpt_path)
+    # Read capability from saved TRAINING config, before deploy overrides merge.
+    rtc_cfg = OmegaConf.select(cfg, "training.rtc", default=None)
+    if rtc_cfg is not None and rtc_cfg.get("enabled", False):
+        architecture.configure_rtc(rtc_cfg, action_horizon=int(cfg.dataloader.num_frames) - 1)
 
     # 5. Move to device and set eval mode — top-down: architecture → video_backbone → submodules.
     _mp = OmegaConf.select(cfg, "training.mixed_precision", default="bf16")
@@ -496,6 +500,12 @@ class _CommandAwareNormalizer:
     def normalize(self, x):
         return self._proprio_inner.normalize(x)
 
+    def normalize_actions(self, x):
+        y = np.array(self._action_inner.normalize_actions(x), copy=True)
+        for d in self._binary_dims:
+            y[..., d] = (np.asarray(x)[..., d] > 0.5).astype(np.float32)
+        return y
+
     @property
     def stats(self):
         return getattr(self._action_inner, "stats", {})
@@ -570,6 +580,21 @@ class _UnifyAwareNormalizer:
             out = np.asarray(out).copy()
             out[..., ~active_raw] = 0.0
         return out
+
+    def normalize_actions(self, x):
+        """Action prefix IN: action stats and action scatter (never state stats/map)."""
+        arr = np.asarray(x, dtype=np.float32)
+        if arr.shape[-1] != len(self._action_dst_index):
+            raise ValueError("Action prefix width must match the checkpoint raw action map")
+        if self._inner is not None:
+            arr = self._inner.normalize_actions(arr)
+        unified, _ = self._map_to_unify(arr, self._action_dst_index, self._unify_dim)
+        active = getattr(self, "_active_action_indices", None)
+        if active is not None:
+            inactive = np.ones(self._unify_dim, dtype=bool)
+            inactive[np.asarray(active, dtype=np.int64)] = False
+            unified[..., inactive] = 0.0
+        return unified
 
     # proprio IN: physical raw → normalized-unified (..., unify_dim) the model wants.
     def normalize(self, x):

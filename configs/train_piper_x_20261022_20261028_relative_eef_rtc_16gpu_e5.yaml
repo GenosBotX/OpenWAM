@@ -1,0 +1,15 @@
+# RTC: 每条样本在 8 个长度中独立等概率抽样，单位为 15Hz action tick。
+defaults:
+  - train_piper_x_20261022_20261028_relative_eef_16gpu_e5
+  - _self_
+
+training:
+  rtc:
+    enabled: true
+    prefix_lengths: [0, 6, 7, 8, 9, 10, 11, 12]
+  output_path: ${oc.env:OPENWAM_REPO_ROOT}/outputs/train_piper_x_20261022_20261028_relative_eef_rtc_16gpu_e5
+  archive:
+    keep_local: true
+
+project:
+  output_dir: ${training.output_path}/hydra

@@ -80,6 +80,23 @@ ERR_INTERNAL = "internal_error"
 MAX_MESSAGE_BYTES = 32 * 1024 * 1024
 
 
+def _request_context(obs: dict) -> dict:
+    """Echo opaque client correlation; client monotonic time is never server time."""
+    context = {}
+    for key in ("request_id", "plan_version", "observation_mono_ns"):
+        if key not in obs:
+            continue
+        value = obs[key]
+        valid = type(value) in (str, int)
+        if key == "observation_mono_ns":
+            valid = type(value) is int and value >= 0
+        if not valid:
+            raise ObsValidationError(f"{key} must be " + (
+                "a nonnegative integer" if key == "observation_mono_ns" else "a string or integer"))
+        context[key] = value
+    return context
+
+
 def _action_response_mode(cfg) -> str:
     from omegaconf import OmegaConf
 
@@ -201,6 +218,15 @@ class PolicyServer:
         """Return checkpoint compatibility plus optional launch ownership."""
 
         result = self._ckpt_contract()
+        rtc_lengths = getattr(getattr(self.engine, "architecture", None), "rtc_prefix_lengths", ())
+        if rtc_lengths:
+            result["rtc_prefix_lengths"] = list(rtc_lengths)
+            result["rtc_prefix_format"] = "absolute_eef20"
+            result["rtc_protocol_version"] = 1
+            result["rtc_conditioning"] = "clean_prefix_zero_timestep"
+            result["rtc_prefix_anchor"] = "observation_state"
+            result["rtc_prefix_index_origin"] = "observation_action_zero"
+            result["rtc_prefix_normalization"] = "training_action_stats_with_clipping"
         # Linglong clients use the wire name "eef" for the 16D quaternion
         # contract. Keep the checkpoint's internal eef_quat representation
         # unchanged: it selects the state/action transforms and statistics.
@@ -235,6 +261,9 @@ class PolicyServer:
         """
         self._init_policy()
         t0 = time.monotonic()
+        context = _request_context(obs)
+        if "action_prefix" in obs and self.action_response_mode != "chunk":
+            raise ObsValidationError("RTC action_prefix requires action_response_mode=chunk")
 
         obs = self._obs_preprocessor.preprocess(obs)
         if self.action_response_mode == "chunk":
@@ -252,6 +281,7 @@ class PolicyServer:
         self._total_latency += latency_ms
 
         result = {
+            **context,
             "action": action.tolist(),
             "step": self._request_count,
             "latency_ms": round(latency_ms, 2),
@@ -262,6 +292,8 @@ class PolicyServer:
                 num_actions=int(action.shape[0]),
                 action_dim=int(action.shape[1]),
             )
+        if "action_prefix" in obs:
+            result["rtc_prefix_length"] = len(obs["action_prefix"])
         return result
 
     def reset(self):
@@ -295,6 +327,7 @@ class PolicyServer:
             logger.info("Client connected: %s", websocket.remote_address)
             try:
                 async for message in websocket:
+                    request_context = {}
                     try:
                         data = json.loads(message)
                         msg_type = data.get("type", OBS)
@@ -303,6 +336,7 @@ class PolicyServer:
                             self.reset()
                             await websocket.send(json.dumps({"type": RESET_ACK}))
                         elif msg_type == OBS:
+                            request_context = _request_context(data)
                             result = self.predict(data)
                             result["type"] = ACTION
                             await websocket.send(json.dumps(result))
@@ -328,6 +362,7 @@ class PolicyServer:
                                     "type": ERROR,
                                     "code": ERR_OBS_VALIDATION,
                                     "message": str(e),
+                                    **request_context,
                                 }
                             )
                         )
@@ -339,6 +374,7 @@ class PolicyServer:
                                     "type": ERROR,
                                     "code": ERR_INTERNAL,
                                     "message": str(e),
+                                    **request_context,
                                 }
                             )
                         )

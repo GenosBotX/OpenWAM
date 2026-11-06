@@ -190,6 +190,13 @@ class BridgeCrossAttention(nn.Module):
         return self.o(x)
 
 
+def _modulation_chunks(modulation, t_mod):
+    combined = modulation.to(dtype=t_mod.dtype, device=t_mod.device) + t_mod
+    if t_mod.ndim == 4:  # [B,H,K,D] -> K tensors [B,H,D]
+        return combined.unbind(dim=-2)
+    return combined.chunk(combined.shape[-2], dim=-2)  # [B,K,D] -> [B,1,D]
+
+
 class CrossAttnActionDiTBlock(nn.Module):
     """Single ActionDiT block for the cross_attn variant.
 
@@ -247,9 +254,7 @@ class CrossAttnActionDiTBlock(nn.Module):
         context: Optional[torch.Tensor] = None,
         context_mask: Optional[torch.Tensor] = None,
     ):
-        (shift_sa, scale_sa, gate_sa, shift_ca, scale_ca, gate_ca, shift_ff, scale_ff, gate_ff) = (
-            self.modulation.to(dtype=t_mod.dtype, device=t_mod.device) + t_mod
-        ).chunk(9, dim=1)
+        (shift_sa, scale_sa, gate_sa, shift_ca, scale_ca, gate_ca, shift_ff, scale_ff, gate_ff) = _modulation_chunks(self.modulation, t_mod)
 
         h = self.self_attn_norm(x_action) * (1 + scale_sa) + shift_sa
         x_action = x_action + gate_sa * self.self_attn(h, freqs=freqs)
@@ -326,7 +331,7 @@ class SelfAttnActionDiTBlock(nn.Module):
         freqs: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Reference forward used in equivalence tests; not invoked by the MoT driver."""
-        chunks = (self.modulation.to(dtype=t_mod.dtype, device=t_mod.device) + t_mod).chunk(6, dim=1)
+        chunks = _modulation_chunks(self.modulation, t_mod)
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = chunks
 
         attn_input = self.self_attn_norm(x) * (1 + scale_msa) + shift_msa
@@ -579,9 +584,13 @@ class ActionDiT(ActionDiTBackbone):
         context_attn_mask = context_mask.unsqueeze(1).expand(-1, seq_len, -1)
         return context_emb, context_attn_mask
 
-    def _prepare_timestep(self, timestep: torch.Tensor, batch_size: int) -> torch.Tensor:
+    def _prepare_timestep(self, timestep: torch.Tensor, batch_size: int, seq_len=None) -> torch.Tensor:
+        if timestep.ndim == 2:
+            if timestep.shape[0] != batch_size or (seq_len is not None and timestep.shape[1] != seq_len):
+                raise ValueError("Per-token action timestep must have shape [B,H]")
+            return timestep
         if timestep.ndim != 1:
-            raise ValueError(f"action timestep must be 1D [B] or [1], got shape {tuple(timestep.shape)}")
+            raise ValueError(f"action timestep must be [B], [1], or [B,H], got shape {tuple(timestep.shape)}")
         if timestep.shape[0] not in (1, batch_size):
             raise ValueError(f"action timestep length must be 1 or batch size ({batch_size}), got {timestep.shape[0]}")
         if timestep.shape[0] == 1 and batch_size > 1:
@@ -652,7 +661,7 @@ class ActionDiT(ActionDiTBackbone):
 
         x = self._embed_actions(action_tokens)
         self._validate_bridge_tuple(x, bridge_tuple)
-        timestep = self._prepare_timestep(timestep, action_tokens.shape[0])
+        timestep = self._prepare_timestep(timestep, action_tokens.shape[0], action_tokens.shape[1])
         t = self.time_embedding(timestep)
         t_mod = self.time_projection(t)
         freqs = action_freqs if action_freqs is not None else self._get_rope_freqs(x.shape[1]).to(device=x.device)
@@ -770,7 +779,7 @@ class ActionDiT(ActionDiTBackbone):
         from openwam.model.architectures.base import ActionState
 
         x = self._embed_actions(noisy_actions)
-        timestep = self._prepare_timestep(timestep, noisy_actions.shape[0])
+        timestep = self._prepare_timestep(timestep, noisy_actions.shape[0], noisy_actions.shape[1])
         t = self.time_embedding(timestep)
         t_mod = self.time_projection(t)
         action_freqs = self._get_rope_freqs(x.shape[1]).to(device=x.device)
@@ -836,9 +845,7 @@ class ActionDiT(ActionDiTBackbone):
         payload: ActionDiTState = astate.payload
         block: SelfAttnActionDiTBlock = self.blocks[layer_id]
 
-        chunks = (block.modulation.to(dtype=payload.t_mod.dtype, device=payload.t_mod.device) + payload.t_mod).chunk(
-            6, dim=1
-        )
+        chunks = _modulation_chunks(block.modulation, payload.t_mod)
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = chunks
 
         residual_x = payload.x_action

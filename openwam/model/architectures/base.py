@@ -1059,6 +1059,18 @@ class BaseWAMArchitecture(ABC, nn.Module):
 
         return inputs
 
+    def configure_rtc(self, config=None, *, action_horizon=None):
+        """Bind RTC capability from training config (also used by checkpoint loading)."""
+        from openwam.model.rtc import validate_prefix_lengths
+        self.rtc_prefix_lengths = ()
+        if not self._cfg_get(config, "enabled", False):
+            return
+        from openwam.model.action_backbone.separate_action_dit import ActionDiT
+        if not isinstance(self.action_backbone, ActionDiT) or self.action_backbone.variant != "joint_self_attn":
+            raise ValueError("RTC currently requires the joint_self_attn ActionDiT backbone")
+        self.rtc_prefix_lengths = validate_prefix_lengths(
+            self._cfg_get(config, "prefix_lengths", ()), action_horizon)
+
     # --- Training: loss computation ---
 
     def compute_loss(
@@ -1146,6 +1158,15 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 a_sigma_bc = action_sigmas.unsqueeze(-1)
             noisy_actions = action_scheduler.add_noise(actions, action_noise, a_sigma_bc)
             action_target = action_scheduler.training_target(actions, action_noise)
+
+            rtc_lengths = getattr(self, "rtc_prefix_lengths", ())
+            if rtc_lengths:
+                from openwam.model.rtc import sample_prefix_mask, suffix_padding_mask
+                prefix = sample_prefix_mask(B, actions.shape[1], rtc_lengths, device=_device)
+                inputs["action_is_pad"] = suffix_padding_mask(actions, inputs.get("action_is_pad"), prefix)
+                # sigma=0 is clean; the suffix keeps its original sampled flow time.
+                noisy_actions = torch.where(prefix.unsqueeze(-1), actions, noisy_actions)
+                action_timesteps = torch.where(prefix, 0, action_timesteps[:, None])
 
         # --- Joint forward pass ---
         forward_inputs = dict(inputs)
@@ -1412,6 +1433,7 @@ class BaseWAMArchitecture(ABC, nn.Module):
         cfg_scale: float = 1.0,
         cfg_merge: bool = False,
         active_action_mask: Optional[Tensor] = None,
+        action_prefix: Optional[Tensor] = None,
         **extra_pipeline_inputs: Any,
     ) -> dict:
         """Execute joint video-action denoising driven by a schedule.
@@ -1426,6 +1448,9 @@ class BaseWAMArchitecture(ABC, nn.Module):
             action_num_frames: Raw state/action window length. Generated
                 action chunk length is ``action_num_frames - 1``. Defaults to
                 ``num_frames`` for datasets whose video/action rates match.
+            action_prefix: Optional clean normalized model-space ``(d, action_dim)``
+                prefix. Only RTC-trained checkpoints accept it. Physical EEF20
+                prefixes should enter via JointInferenceEngine instead.
             active_action_mask: Optional ``(action_dim,)`` boolean mask for the
                 benchmark being generated. Inactive unified-action dimensions
                 stay on their analytic zero-padding noise path. When omitted,
@@ -1465,6 +1490,22 @@ class BaseWAMArchitecture(ABC, nn.Module):
             dit_cache = None
 
         action_num_frames = int(action_num_frames if action_num_frames is not None else num_frames)
+        rtc_lengths = getattr(self, "rtc_prefix_lengths", ())
+        prefix_len = 0
+        if action_prefix is not None:
+            if not rtc_lengths:
+                raise ValueError("action_prefix requires a checkpoint trained with RTC")
+            action_prefix = torch.as_tensor(action_prefix, device=device, dtype=dtype)
+            if action_prefix.ndim != 2 or action_prefix.shape[1] != self.action_dim:
+                raise ValueError("action_prefix must be normalized model-space [d,action_dim]")
+            if not bool(torch.isfinite(action_prefix).all()):
+                raise ValueError("action_prefix contains non-finite values")
+            prefix_len = action_prefix.shape[0]
+        if rtc_lengths:
+            if prefix_len not in rtc_lengths or prefix_len >= action_num_frames - 1:
+                raise ValueError(f"Unsupported RTC prefix length {prefix_len}; trained lengths: {rtc_lengths}")
+            # Cached velocities do not represent per-token clean-prefix conditioning.
+            dit_cache = None
 
         # CFG knobs ARE forwarded so a CFG-capable backbone (CosmosPredict25)
         # can materialise ``inputs_shared['uncond_context']`` from its own
@@ -1532,6 +1573,16 @@ class BaseWAMArchitecture(ABC, nn.Module):
         # into the next denoising step.
         inactive_action_noise = None
         inactive_action_dims = self._resolve_inactive_action_dims(active_action_mask, device)
+        rtc_prefix_mask = None
+        rtc_prefix_values = None
+        if rtc_lengths:
+            rtc_prefix_mask = torch.arange(action_num_frames - 1, device=device)[None, :] < prefix_len
+            rtc_prefix_values = torch.zeros_like(action_latents)
+            if prefix_len:
+                if inactive_action_dims is not None and bool((action_prefix[:, inactive_action_dims] != 0).any()):
+                    raise ValueError("RTC prefix inactive action dimensions must be zero")
+                rtc_prefix_values[:, :prefix_len] = action_prefix
+            action_latents = torch.where(rtc_prefix_mask.unsqueeze(-1), rtc_prefix_values, action_latents)
 
         num_train_ts_v = float(self.video_scheduler.num_train_timesteps)
         num_train_ts_a = float(self.action_scheduler.num_train_timesteps)
@@ -1559,6 +1610,8 @@ class BaseWAMArchitecture(ABC, nn.Module):
             # only gates the *update* below, never the forward inputs.
             v_timestep = torch.tensor([t_v], dtype=dtype, device=device)
             a_timestep = torch.tensor([t_a], dtype=dtype, device=device)
+            if rtc_prefix_mask is not None:
+                a_timestep = torch.where(rtc_prefix_mask, 0, a_timestep[:, None])
 
             if (
                 dit_cache is not None
@@ -1612,6 +1665,8 @@ class BaseWAMArchitecture(ABC, nn.Module):
                 )
                 if inactive_action_dims is not None:
                     action_latents[..., inactive_action_dims] = inactive_action_noise * float(sigma_a_next)
+                if rtc_prefix_mask is not None:
+                    action_latents = torch.where(rtc_prefix_mask.unsqueeze(-1), rtc_prefix_values, action_latents)
 
         if profile:
             if torch.cuda.is_available():

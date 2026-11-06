@@ -92,7 +92,8 @@ class TimestepEmbedding(nn.Module):
         )
 
     def forward(self, timestep: torch.Tensor) -> torch.Tensor:
-        t = sinusoidal_embedding_1d(self.freq_dim, timestep)
+        t = sinusoidal_embedding_1d(self.freq_dim, timestep.reshape(-1))
+        t = t.reshape(*timestep.shape, self.freq_dim)
         return self.mlp(t)
 
 

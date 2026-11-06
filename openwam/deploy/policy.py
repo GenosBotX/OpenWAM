@@ -64,6 +64,8 @@ class WAMPolicy:
         values between the two legal commands. Threshold 0.5 preserves the
         downstream command contract for the WS server and direct consumers.
         """
+        if "action_prefix" in obs:
+            raise ValueError("RTC prefixes require chunk responses and an external timeline-aware executor")
         action = self._executor.predict_action(self._build_conditions(obs))
         return self._normalize_eef_quaternions(self._project_binary_commands(action))
 
@@ -148,4 +150,6 @@ class WAMPolicy:
             conditions["prompt"] = obs["prompt"]
         if "state" in obs and obs["state"] is not None:
             conditions["proprio"] = obs["state"]
+        if "action_prefix" in obs:
+            conditions["action_prefix"] = obs["action_prefix"]
         return conditions

@@ -153,6 +153,12 @@ class OpenWAMTrainer:
         # Loss weights from the training config
         self.lambda_video = float(t.lambda_video)
         self.lambda_action = float(t.lambda_action)
+        rtc_cfg = t.get("rtc", None)
+        if rtc_cfg is not None and rtc_cfg.get("enabled", False):
+            if self.lambda_action <= 0:
+                raise ValueError("RTC training requires lambda_action > 0")
+            self.architecture.configure_rtc(rtc_cfg, action_horizon=int(cfg.dataloader.num_frames) - 1)
+            logger.info("RTC prefix lengths (uniform per sample): %s", self.architecture.rtc_prefix_lengths)
 
         # Push forward-time training flags onto the architecture so prepare_inputs
         # is self-contained.

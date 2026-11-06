@@ -1,0 +1,29 @@
+# Functional reference preset for the trained clean-prefix RTC checkpoint.
+# Client performs async scheduling/playback=4; server returns one whole chunk.
+# Enable optimized paths only after checking changing state/prefix/d on a GPU.
+checkpoint_path: null
+device: cuda:0
+server:
+  host: "0.0.0.0"
+  port: 8848
+inference:
+  action_response_mode: chunk
+  inference_mode: sync
+  denoise_mode: sync
+  denoise_steps: 5
+  num_frames: 33
+  video_num_frames: 9
+optimization:
+  decode_video: false
+  video_fp8:
+    enabled: false
+  dit_cache:
+    enabled: false
+  compile:
+    enabled: false
+    self_attn:
+      cuda_graph:
+        enabled: false
+  prompt_embed_cache:
+    enabled: true
+    maxsize: 32

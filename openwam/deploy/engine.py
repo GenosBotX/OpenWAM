@@ -342,6 +342,11 @@ class JointInferenceEngine(BaseInferenceEngine):
 
         reference_state = capture_action_reference(
             getattr(self.architecture, "repr_contract", {}) or {}, proprio)
+        normalized_prefix = raw_prefix = None
+        if "action_prefix" in conditions:
+            from openwam.deploy.rtc import prepare_rtc_prefix
+            normalized_prefix, raw_prefix = prepare_rtc_prefix(
+                self.architecture, conditions["action_prefix"], reference_state)
         if proprio is not None:
             proprio = self.architecture.normalize_deploy_proprio(proprio)
 
@@ -378,8 +383,18 @@ class JointInferenceEngine(BaseInferenceEngine):
                 "cfg_merge": self._cfg_merge,
             }
         )
+        if normalized_prefix is not None:
+            # Do not pass through the compatibility filter: silently dropping an
+            # RTC prefix would turn this request into unconstrained generation.
+            generate_kwargs["action_prefix"] = normalized_prefix
         result = self.architecture.generate(**generate_kwargs)
         result = restore_action_chunk(result, reference_state)
+        if raw_prefix is not None:
+            # Normalization clips out-of-range values; return the committed
+            # physical commands exactly, not their clipped reconstruction.
+            result["actions"] = result["actions"].copy()
+            result["actions"][:len(raw_prefix)] = raw_prefix
+            result["rtc_prefix_length"] = len(raw_prefix)
 
         # Attach optimization stats if profiling
         if self._profile and self._dit_cache is not None:

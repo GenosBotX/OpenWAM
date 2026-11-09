@@ -26,8 +26,9 @@ def test_uniform_per_example_sampling():
     mask = sample_prefix_mask(16000, 32, DEFAULT_PREFIX_LENGTHS, device='cpu')
     lengths, counts = mask.sum(1).unique(return_counts=True)
     assert lengths.tolist() == list(DEFAULT_PREFIX_LENGTHS)
-    assert ((counts > 1800) & (counts < 2200)).all()
-    assert not mask[:, 12:].any()
+    expected = 16000 / len(DEFAULT_PREFIX_LENGTHS)
+    assert ((counts > expected * .9) & (counts < expected * 1.1)).all()
+    assert not mask[:, 16:].any()
 
 
 @pytest.mark.parametrize('lengths,horizon', [([],32), ([6,7],32), ([0,6,6],32), ([0,-1],32), ([0,True],32), ([0,6.0],32), ([0,12],12)])
@@ -213,7 +214,7 @@ def test_rtc_config_inherits_current_training_setting(monkeypatch):
     from pathlib import Path
     monkeypatch.setenv('OPENWAM_REPO_ROOT','/vePFS/liqi/OpenWAM-CUDAGraph')
     with initialize_config_dir(config_dir=str(Path(__file__).resolve().parents[1]/'configs'),version_base=None):
-        cfg = compose(config_name='train_piper_x_20261022_20261028_relative_eef_rtc_16gpu_e5')
+        cfg = compose(config_name='train_piper_x_20261022_20261028_relative_eef_rtc_p16_16gpu_e5')
     assert tuple(cfg.training.rtc.prefix_lengths) == DEFAULT_PREFIX_LENGTHS
     assert cfg.training.rtc.enabled and cfg.dataloader.relative_to_state
     assert cfg.dataloader.num_frames == 33 and cfg.dataloader.video_stride == 4

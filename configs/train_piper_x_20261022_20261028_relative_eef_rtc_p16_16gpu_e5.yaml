@@ -1,0 +1,13 @@
+# RTC: uniformly sample d=0 or d=6..16, in 15 Hz action ticks.
+defaults:
+  - train_piper_x_20261022_20261028_relative_eef_rtc_16gpu_e5
+  - _self_
+
+training:
+  rtc:
+    enabled: true
+    prefix_lengths: [0, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+  output_path: ${oc.env:OPENWAM_REPO_ROOT}/outputs/train_piper_x_20261022_20261028_relative_eef_rtc_p16_16gpu_e5
+
+project:
+  output_dir: ${training.output_path}/hydra

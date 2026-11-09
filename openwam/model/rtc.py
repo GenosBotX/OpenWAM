@@ -3,7 +3,7 @@ from numbers import Integral
 
 import torch
 
-DEFAULT_PREFIX_LENGTHS = (0, 6, 7, 8, 9, 10, 11, 12)
+DEFAULT_PREFIX_LENGTHS = (0, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)
 
 
 def validate_prefix_lengths(values, horizon=None):

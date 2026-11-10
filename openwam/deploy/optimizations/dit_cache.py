@@ -10,7 +10,8 @@ embedding similarity within a single step). DiT velocity caching
 operates across steps in the denoising loop.
 """
 
-from typing import Optional
+from numbers import Integral
+from typing import Optional, Sequence
 
 import torch
 from torch import Tensor
@@ -39,6 +40,11 @@ class DiTVelocityCache:
             before forcing a recomputation. Prevents drift accumulation.
         interpolation_weight: When reusing, optionally blend cached velocity
             toward the expected direction. 0.0 = pure cache, 1.0 = full recompute.
+        mode: "adaptive" uses similarity and max_consecutive_skips (default).
+            "fixed" recomputes only at recompute_steps, with a cold-cache
+            fallback when a required prediction is missing.
+        recompute_steps: Strictly increasing, one-based steps starting with 1.
+            Fixed mode ignores cosine_threshold and max_consecutive_skips.
     """
 
     def __init__(
@@ -46,7 +52,21 @@ class DiTVelocityCache:
         cosine_threshold: float = 0.99,
         max_consecutive_skips: int = 3,
         interpolation_weight: float = 0.0,
+        *,
+        mode: str = "adaptive",
+        recompute_steps: Sequence[int] = (1, 3),
     ):
+        if mode not in ("adaptive", "fixed"):
+            raise ValueError("dit_cache.mode must be 'adaptive' or 'fixed'")
+        try:
+            steps = tuple(recompute_steps)
+        except TypeError as exc:
+            raise ValueError("dit_cache.recompute_steps must be a sequence of integers") from exc
+        if (not steps or any(isinstance(s, bool) or not isinstance(s, Integral) or s < 1 for s in steps)
+                or steps[0] != 1 or tuple(sorted(set(steps))) != steps):
+            raise ValueError("dit_cache.recompute_steps must be strictly increasing positive integers starting with 1")
+        self.mode = mode
+        self.recompute_steps = steps
         self.cosine_threshold = cosine_threshold
         self.max_consecutive_skips = max_consecutive_skips
         self.interpolation_weight = interpolation_weight
@@ -59,6 +79,18 @@ class DiTVelocityCache:
         self._consecutive_skips: int = 0
         self._total_skips: int = 0
         self._total_steps: int = 0
+
+    def validate_schedule(self, num_steps: int, denoise_mode: str):
+        """Reject unsupported fixed schedules before any denoising work.
+
+        Fixed step numbers refer to joint synchronous updates, not client
+        execution ticks. Async schedules can contain single-stream plateaus.
+        """
+        if self.mode == "fixed":
+            if denoise_mode != "sync":
+                raise ValueError("Fixed DiT cache requires inference.denoise_mode=sync")
+            if self.recompute_steps[-1] > num_steps:
+                raise ValueError("dit_cache.recompute_steps exceeds inference.denoise_steps")
 
     def should_recompute(self, current_sigma: float, *, require_action: bool = False,
                          action_mask: Optional[Tensor] = None) -> bool:
@@ -78,6 +110,15 @@ class DiTVelocityCache:
             True if the DiT should be run, False if cache can be reused.
         """
         self._total_steps += 1
+
+        if self.mode == "fixed":
+            if (self._total_steps in self.recompute_steps
+                    or self._cached_velocity is None
+                    or (require_action and self._cached_action_velocity is None)):
+                return True
+            self._consecutive_skips += 1
+            self._total_skips += 1
+            return False
 
         if self._cached_velocity is None or self._prev_velocity is None:
             return True
@@ -172,4 +213,6 @@ class DiTVelocityCache:
             "total_skips": self._total_skips,
             "skip_rate": self.skip_rate,
             "cosine_threshold": self.cosine_threshold,
+            "mode": self.mode,
+            "recompute_steps": list(self.recompute_steps) if self.mode == "fixed" else None,
         }

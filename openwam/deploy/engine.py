@@ -208,8 +208,14 @@ class JointInferenceEngine(BaseInferenceEngine):
                 self._dit_cache = DiTVelocityCache(
                     cosine_threshold=getattr(dc, "cosine_threshold", 0.99),
                     max_consecutive_skips=getattr(dc, "max_skips", 3),
+                    mode=getattr(dc, "mode", "adaptive"),
+                    recompute_steps=getattr(dc, "recompute_steps", (1, 3)),
                 )
-                logger.info("DiT velocity cache enabled (threshold=%.3f)", dc.cosine_threshold)
+                self._dit_cache.validate_schedule(
+                    self.cfg.inference.denoise_steps,
+                    getattr(self.cfg.inference, "denoise_mode", "sync"),
+                )
+                logger.info("DiT velocity cache enabled: %s", self._dit_cache.stats)
 
         # torch.compile — ActionDiT, Video DiT, VAE
         if optimization and getattr(optimization, "compile", None):
@@ -299,6 +305,8 @@ class JointInferenceEngine(BaseInferenceEngine):
         lead_modality = conditions.get("lead_modality", getattr(inf_cfg, "lead_modality", "video"))
         variance_shift_alpha = conditions.get("variance_shift_alpha", getattr(inf_cfg, "variance_shift_alpha", 1.0))
         linear_offset = conditions.get("linear_offset", getattr(inf_cfg, "linear_offset", 0.0))
+        if self._dit_cache is not None:
+            self._dit_cache.validate_schedule(denoise_steps, denoise_mode)
         # Single source of truth for each stream's α-shift is the backbone
         # property — ``action_backbone.shift_action`` and
         # ``video_backbone.shift_video`` — set via the model yaml and saved in

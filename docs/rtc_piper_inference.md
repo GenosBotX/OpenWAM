@@ -124,7 +124,7 @@ prefix 不足、计划版本失效、重连、人工接管、SDK部分成功、�
 
 此前 `openwam/model/architectures/base.py` 在 RTC 分支直接执行 `dit_cache = None` 是适配阶段的保守实现，并非训练 RTC 的理论要求。本版移除此限制。CFG scale>1 原有禁用规则仍在；当前 5 步配置使用默认 CFG scale=1。
 
-- 每个请求开始清空 cache；prefix/state/d/prompt 改变后重新计算最初的两次预测，不跨请求复用速度。
+- 每个请求开始清空 cache，不跨请求复用速度。自适应模式先计算第 1、2 步；固定模式按指定步号计算（见第 9 节）。
 - 请求内部同时缓存 video/action 的 flow velocity；只在视频预测和有效动作后缀预测都满足余弦阈值时跳过联合 DiT forward。动作比较排除冻结 prefix 和 80D 中未使用的通道，避免这些通道掩盖后缀变化。
 - 每个去噪步骤仍把 prefix 钳制回原值，prefix action timestep 仍为零。复用速度不会解除 RTC 条件。
 - 这是近似加速。余弦相似度不约束幅值；即使 prefix 保持不变，suffix 也可能偏离 cache-off。0.99 阈值不代表误差低于 1%。5 步最多可由两次真实 forward 加三次复用完成，但命中率和总耗时需要实测，不能把理论上限当实测值。
@@ -176,3 +176,33 @@ export OPENWAM_BASE_CHECKPOINT=/home/zhuoyu/piper-x/OpenWAM-Alpha-Real-RoboDojo-
 客户端 P80 从当前进程当前执行阶段在线累计的最近 64 个有效延迟样本计算，重启清空；不自动读取以前日志。历史日志只用于设计参数起点。前缀长度仍受训练集合及现有队列约束。
 
 本次 CPU 回归：185 passed、1 skipped（需要 CUDA）、1 deselected。排除的 `test_dual_system_joint_self_attn_compile_auto_sets_mot_loop` 在未修改的 `8bdb571` 上也失败：它断言 torch.compile 调用一次，而已有代码对联合循环和 request-context KV 分别编译，共两次；不是此次 cache 改动引入。缓存测试覆盖全部八种 d、真实跳过 forward、每步 prefix 固定、跨请求清空，以及物理误差单位和配对测量隔离。这些检查不替代完整 checkpoint 的 GPU 验收。
+
+## 9. 固定重算与自适应缓存切换（2026-11-10）
+
+`optimization.dit_cache` 支持以下启动命令覆盖，均为云端配置；客户端无需增加参数。
+
+```bash
+# 固定重算：5 步去噪中仅第 1、3 步运行联合 DiT。
+optimization.dit_cache.enabled=true \
+optimization.dit_cache.mode=fixed \
+'optimization.dit_cache.recompute_steps=[1,3]'
+
+# 自适应：保留原来的余弦判据和连续跳步上限。
+optimization.dit_cache.enabled=true \
+optimization.dit_cache.mode=adaptive \
+optimization.dit_cache.cosine_threshold=0.99 \
+optimization.dit_cache.max_skips=3
+
+# 关闭两种速度缓存；FP8、compile、CUDA Graph 由各自开关控制。
+optimization.dit_cache.enabled=false
+```
+
+省略 `mode` 保持 `adaptive`，现有配置和命令兼容。优化 preset 也保留自适应默认值，需显式指定 `mode=fixed` 才切换。步号从 1 开始，与客户端执行的动作步和前缀 d 无关；`[1,3]` 的复用来源为 `[1,1,3,3,3]`。每步仍积分更新 video/action latent，使用各步自身的 sigma 间隔，RTC 前缀仍逐步钳制且 timestep 为零。固定模式忽略 `cosine_threshold`、`max_skips`，缺少必要缓存时仍强制 forward。
+
+固定模式当前支持云端 `inference.denoise_mode=sync`。这不影响客户端 `--async`、三种执行模式或在线动态选择 d。步号必须为严格递增的正整数、含第 1 步、且不超过 `inference.denoise_steps`；启动和引擎请求覆盖均校验。每请求重置缓存及计数。启动日志输出 mode/步号；`WAM_PROFILE=1` 时引擎返回的 `dit_cache_stats` 也包含 mode、步号和实际跳步数（当前 WebSocket 响应未透传此字段）。
+
+先前 A800 BF16 p16/d16 的 7 个请求、4 个种子配对回放：固定 `[1,3]` 相对 cache-off 的右臂平均位置偏差 9.27 mm，自适应 0.99/3 为 13.79 mm；平均引擎耗时分别 116.9/120.4 ms。固定方案仍有误差，也未证明解决衔接反转。该结果不等于 4090 FP8/compile 的端到端精度和时延验收。
+
+新 p16 权重在 4090 的目录为 `/home/zhuoyu/liqi/ckpt/1106_rtc_p16_based_0020`，文件 `checkpoint_step_14525.safetensors`；与旧 p12 的 `1106_rtc_based_0020` 区分。训练集合为 `{0,6,...,16}`，客户端仍从服务端 PONG 读取支持长度，根据当前运行的实测延迟及可用队列动态选择 d，无需固定为 16。
+
+本次接入验证：云端缓存/RTC/部署边界及 CLI/归一化/去噪调度共 269 项回归通过。A800 使用 p16 最终权重、真实记录请求及 seed=42，在 5 组输入（real_000001 d0/d6/d16、real_000002 d6、real_000311 d16）比较配置驱动的正式 fixed 模式、原离线 Fixed13 实现及已归档 fixed_13 输出，全部逐元素一致；每次 5 步中跳过 3 步，物理前缀精确保持。此验证使用 BF16、FP8/compile 关闭，未占用 4090 或替换其运行服务。客户端 `b5215ff` 的 RTC/异步调度回归 75 项通过，4090 已同步该版本，长度专测 24 项通过。

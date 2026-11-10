@@ -138,14 +138,15 @@ def test_generate_pins_prefix_every_step_and_preserves_inactive_noise(delay, mon
     assert (result['actions'][:,_PIN_INACTIVE_IDX] == 0).all()
 
 
-@pytest.mark.parametrize('delay', DEFAULT_PREFIX_LENGTHS)
-def test_cached_rtc_skips_forwards_and_resets_between_changed_requests(delay, monkeypatch):
+@pytest.mark.parametrize('mode', ['adaptive', 'fixed'])
+@pytest.mark.parametrize('delay', [0, *range(6, 17)])
+def test_cached_rtc_skips_forwards_and_resets_between_changed_requests(delay, mode, monkeypatch):
     from tests.test_wam_architecture import _make_inactive_dim_probe_arch, _PIN_ACTIVE_IDX, _PIN_INACTIVE_IDX
     from openwam.deploy.optimizations.dit_cache import DiTVelocityCache
     monkeypatch.setattr(torch.compiler, 'cudagraph_mark_step_begin', lambda: None)
     arch = _make_inactive_dim_probe_arch()
-    arch.rtc_prefix_lengths = DEFAULT_PREFIX_LENGTHS
-    cache = DiTVelocityCache()
+    arch.rtc_prefix_lengths = (0, *range(6, 17))
+    cache = DiTVelocityCache(mode=mode)
     mask = torch.zeros(8, dtype=torch.bool)
     mask[_PIN_ACTIVE_IDX] = True
     kwargs = dict(schedule=[(1000.-i*200, 1000.-i*200) for i in range(6)],

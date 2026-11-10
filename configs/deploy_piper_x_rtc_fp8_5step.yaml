@@ -21,6 +21,9 @@ optimization:
     enabled: true
   dit_cache:
     enabled: true
+    # adaptive: cosine criterion; fixed: recompute at one-based steps below.
+    mode: adaptive
+    recompute_steps: [1, 3]
     cosine_threshold: 0.99
     max_skips: 3
   prompt_embed_cache:

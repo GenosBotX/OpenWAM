@@ -1,0 +1,236 @@
+# Based on frozen stop_C_halfhold config; original Piper-X base, RTC d=0 or 6..16.
+dataloader:
+  action_mode: eef
+  active_raw_action_dims:
+  - 0
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  - 8
+  - 9
+  - 10
+  - 11
+  - 12
+  - 13
+  - 14
+  - 15
+  - 16
+  - 17
+  - 18
+  - 19
+  active_raw_state_dims:
+  - 0
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  - 8
+  - 9
+  - 10
+  - 11
+  - 12
+  - 13
+  - 14
+  - 15
+  - 16
+  - 17
+  - 18
+  - 19
+  cache_dir: /tmp/openwam-piper-halfhold-rtc-tos-cache
+  cache_max_bytes: 4294967296
+  cache_min_free_bytes: 1073741824
+  camera_layout:
+  - head
+  - left
+  - right
+  dataset_dir:
+  - tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261105_stop_C_halfhold_v1/20261022_eef_v1/train
+  - tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261105_stop_C_halfhold_v1/20261023_eef_v1/train
+  - tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261105_stop_C_halfhold_v1/20261024_eef_v1/train
+  - tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261105_stop_C_halfhold_v1/20261026_eef_v2/train
+  - tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261105_stop_C_halfhold_v1/20261026_static_eef_v2/train
+  - tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261105_stop_C_halfhold_v1/20261027_eef_v1/train
+  - tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261105_stop_C_halfhold_v1/20261027_static_eef_v1/train
+  - tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261105_stop_C_halfhold_v1/20261028_eef_v1/train
+  - tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261105_stop_C_halfhold_v1/20261029_basket_eef_v1/train
+  - tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261105_stop_C_halfhold_v1/20261029_box_eef_v1/train
+  eval_dataset_dir:
+  - tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261022_eef_v1/test
+  - tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261023_eef_v1/test
+  - tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261024_eef_v1/test
+  - tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261026_eef_v2/test
+  - tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261026_static_eef_v2/test
+  - tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261027_eef_v1/test
+  - tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261027_static_eef_v1/test
+  - tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261028_eef_v1/test
+  - tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261029_basket_eef_v1/test
+  - tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261029_box_eef_v1/test
+  height: 384
+  multiview: true
+  normalization_dataset_dir: tos://ml-platform-auto-created-required-2109640594-cn-beijing/piperx/openwam/20261105_stop_C_halfhold_v1/normalization
+  normalize_mode: min-max
+  num_frames: 33
+  overfit_episode: 0
+  overfit_repeats: 1
+  overfit_single: false
+  relative_to_state: true
+  seed: 42
+  type: piper_x
+  unify_action: true
+  unify_action_map:
+  - 0-9
+  - 34-43
+  unify_state_map:
+  - 0-9
+  - 34-43
+  video_stride: 4
+  width: 320
+  window_stride: 1
+model:
+  action_backbone:
+    dim: 1024
+    ffn_dim: 4096
+    shift_action: 5.0
+  architecture:
+    action_dim: 80
+    attention_mask_mode: mutual
+    bridge_interval: 1
+    bridge_layers: null
+    detach_bridge: false
+    framework: dual_system
+    idm_video_cond_noise_prob: 0.5
+    mot_checkpoint_mixed_attn: true
+    state_dim: 80
+    use_proprioception: true
+    variant: joint_self_attn
+    video_attention_mask_mode: first_frame_causal
+  freeze:
+  - video_backbone.text_encoder
+  - video_backbone.reason1
+  - video_backbone.vae
+  - video_backbone.image_encoder
+  - video_backbone.video_encoder
+  video_backbone:
+    components:
+    - attr: dit
+      extra_kwargs:
+        dim: 3072
+        eps: 1.0e-06
+        ffn_dim: 14336
+        freq_dim: 256
+        fuse_vae_embedding_in_latents: true
+        has_image_input: false
+        in_dim: 48
+        num_heads: 24
+        num_layers: 30
+        out_dim: 48
+        patch_size:
+        - 1
+        - 2
+        - 2
+        require_clip_embedding: false
+        require_vae_embedding: false
+        seperated_timestep: true
+        text_dim: 4096
+      model_class: openwam.model.video_backbone.wan.models.dit.WanModel
+    - attr: vae
+      extra_kwargs: {}
+      model_class: openwam.model.video_backbone.wan.models.vae.WanVideoVAE38
+    - attr: text_encoder
+      extra_kwargs: {}
+      model_class: openwam.model.video_backbone.wan.models.text_encoder.WanTextEncoder
+    encoder:
+      model_path: /vePFS/tangyuting/models/Wan2.2-TI2V-5B
+      name: wan22_vae
+    from_scratch: false
+    model_path: /vePFS/tangyuting/models/Wan2.2-TI2V-5B
+    name: wan22_ti2v_5b
+    shift_video: 5.0
+    tokenizer:
+      attr: tokenizer
+      class: openwam.model.video_backbone.wan.models.text_encoder.HuggingfaceTokenizer
+      kwargs:
+        clean: whitespace
+        seq_len: 512
+      path_kwarg: name
+      subdir: tokenizer/google/umt5-xxl
+project:
+  name: openwam
+  output_dir: ${training.output_path}/hydra
+  seed: 42
+  wandb:
+    entity: null
+    project: null
+    run_name: null
+training:
+  action_lr: null
+  adam_betas:
+  - 0.9
+  - 0.95
+  archive:
+    enabled: true
+    root: ${oc.env:OPENWAM_EXPERIMENTS_TOS,tos://ml-platform-auto-created-required-2109640594-cn-beijing/experiments}
+    path: null
+    local_root: /vePFS/tangyuting
+    keep_local: true
+    credentials_file: ${oc.env:OPENWAM_TOS_CREDENTIALS,/vePFS/tangyuting/.config/openwam/tos-linglong.json}
+    endpoint: ${oc.env:TOS_ENDPOINT,tos-cn-beijing.ivolces.com}
+    workers: 4
+    wait_timeout_s: 86400
+  async_checkpoints: true
+  batch_size: 6
+  checkpoint_base_path: /vePFS/data/openwam/OpenWAM-Alpha-Real-RoboDojo-Piper-X/checkpoint_step_30000.safetensors
+  checkpoint_base_sha256: fa5c1705ad553a3e042906213941acdc3ed958f81b7a2c7cfbc063fc61c80b4e
+  checkpoint_base_url: https://huggingface.co/OpenWAM/OpenWAM-Alpha-Real-RoboDojo-Piper-X/resolve/main/checkpoint_step_30000.safetensors
+  checkpoint_staging_dir: null
+  dataset_num_workers: 8
+  debug: false
+  finetune_ckpt_path: /vePFS/data/openwam/OpenWAM-Alpha-Real-RoboDojo-Piper-X/checkpoint_step_30000.safetensors
+  gradient_accumulation_steps: 8
+  initialize_model_on_cpu: false
+  keep_last_k_ckpts: 2
+  lambda_action: 1.0
+  lambda_video: 1.0
+  learning_rate: 0.0001
+  lr_min_ratio: 0.01
+  lr_scheduler: cosine
+  max_grad_norm: 1.0
+  max_steps: null
+  max_timestep_boundary: 1.0
+  min_timestep_boundary: 0.0
+  mixed_precision: bf16
+  num_epochs: 5
+  offload_optimizer_device: none
+  output_path: ${oc.env:OPENWAM_REPO_ROOT}/outputs/train_piper_stop_c_halfhold_relative_eef_rtc_p16_16gpu_e5
+  resume_ckpt_path: null
+  save_full_states_for_resume: true
+  save_steps: 2000
+  save_trainable_only: true
+  use_gradient_checkpointing: true
+  use_gradient_checkpointing_offload: false
+  video_lr: null
+  warmup_ratio: 0.05
+  weight_decay: 0.01
+  zero_stage: 2
+  rtc:
+    enabled: true
+    prefix_lengths:
+    - 0
+    - 6
+    - 7
+    - 8
+    - 9
+    - 10
+    - 11
+    - 12
+    - 13
+    - 14
+    - 15
+    - 16

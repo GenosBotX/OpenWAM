@@ -30,6 +30,7 @@ import torch
 from PIL import Image
 
 from openwam.dataloader.bases import BaseDataset
+from openwam.dataloader.piper_windows import training_windows
 from openwam.dataloader.tos_cache import BoundedTosCache, DatasetStorage, join_tos
 from openwam.dataloader.transforms.multiview import assemble_multiview_layout
 from openwam.dataloader.utils import get_cfg
@@ -113,6 +114,15 @@ def _eef20_stats(bucket: str) -> tuple[dict, dict]:
     state = _pack_eef20(np.concatenate(state_rows, axis=0))
     action = _pack_eef20(np.concatenate(action_rows, axis=0))
     return _vector_stats(action, pin_rot6d=True), _vector_stats(state, pin_rot6d=True)
+
+
+def _canonical_source_reference(reference, dataset_root):
+    """Resolve published /tos object references against the active TOS bucket."""
+    reference = str(reference)
+    if str(dataset_root).startswith("tos://") and reference.startswith("/tos/"):
+        bucket_root = "/".join(str(dataset_root).split("/")[:3])
+        return join_tos(bucket_root, reference[len("/tos/"):])
+    return reference
 
 
 class PiperXDataset(BaseDataset):
@@ -257,7 +267,11 @@ class PiperXDataset(BaseDataset):
         manifest = self._read_manifest(self._storage, self.split)
         source_root = str(manifest.get("source_root", "."))
         if self._remote:
-            self._source_root = self.dataset_dir if source_root == "." else join_tos(self.dataset_dir, source_root)
+            source_root = _canonical_source_reference(source_root, self.dataset_dir)
+            if source_root.startswith("tos://"):
+                self._source_root = source_root
+            else:
+                self._source_root = self.dataset_dir if source_root == "." else join_tos(self.dataset_dir, source_root)
         else:
             self._source_root = self.dataset_dir / source_root
             if not self._source_root.is_dir():
@@ -301,12 +315,10 @@ class PiperXDataset(BaseDataset):
             self._action_dim = self.raw_dim
             self._state_dim = self.raw_dim
 
-        self._windows = []
-        window_extent = 1 if self.static_hold else self.num_frames
-        for local, episode in enumerate(self._episodes):
-            max_start = int(episode["length"]) - window_extent
-            if max_start >= 0:
-                self._windows.extend((local, start) for start in range(0, max_start + 1, self.window_stride))
+        self._windows = training_windows(
+            self._storage, manifest, self._episodes, self.num_frames, self.window_stride,
+        )
+        selected_window_count = len(self._windows)
         if not self._windows:
             raise ValueError(f"Piper X split={self.split!r} has no {self.num_frames}-frame windows")
         if self.overfit_single:
@@ -337,8 +349,21 @@ class PiperXDataset(BaseDataset):
                     raise ValueError("EEF20 statistics must be computed from training frames only")
                 if self.relative_to_state:
                     validate_relative_metadata(payload, num_frames=self.num_frames, window_stride=self.window_stride)
-                    if self.split == "train" and str(self.dataset_dir) not in payload.get("sources", {}):
-                        raise ValueError("Relative EEF statistics do not include this training source")
+                    source_metadata = {
+                        _canonical_source_reference(key, self.dataset_dir): value
+                        for key, value in payload.get("sources", {}).items()
+                    }
+                    if self.split == "train":
+                        if str(self.dataset_dir) not in source_metadata:
+                            raise ValueError("Relative EEF statistics do not include this training source")
+                        source = source_metadata[str(self.dataset_dir)]
+                        if manifest.get("window_selection"):
+                            import hashlib
+                            selected = self._storage.text(manifest["window_selection"])
+                            digest = hashlib.sha256(selected.encode("utf-8")).hexdigest()
+                            if (source.get("window_selection_sha256") != digest
+                                    or source.get("windows") != selected_window_count):
+                                raise ValueError("Relative EEF statistics do not match selected windows")
                 self._action_stats, self._state_stats = [
                     {key: np.asarray(payload[stream][key],dtype=np.float32) for key in ("mean","std","min","max","q01","q99")}
                     for stream in ("action","state")]

@@ -1,0 +1,44 @@
+# Release 0050: trained RTC, FP8, five denoising steps, fixed step-1/3 refresh.
+# Model-panel custom commits do not load repository defaults automatically.
+# Select this YAML explicitly; keep override_model_defaults=false on the panel.
+checkpoint_path: null
+device: cuda:0
+server:
+  host: "0.0.0.0"
+  port: 8848
+inference:
+  action_response_mode: chunk
+  denoise_steps: 5
+  denoise_mode: sync
+  inference_mode: sync
+  num_frames: 33
+  video_num_frames: 9
+  height: 384
+  width: 320
+optimization:
+  decode_video: false
+  video_fp8:
+    enabled: true
+  dit_cache:
+    enabled: true
+    mode: fixed
+    recompute_steps: [1, 3]
+    # Used only if mode is switched back to adaptive.
+    cosine_threshold: 0.99
+    max_skips: 3
+  prompt_embed_cache:
+    enabled: true
+    maxsize: 32
+  compile:
+    enabled: true
+    required: true
+    self_attn:
+      enabled: true
+      torch_mode: default
+      dynamic: false
+      cuda_graph:
+        enabled: true
+    wan_blocks:
+      enabled: true
+      torch_mode: default
+      dynamic: false
